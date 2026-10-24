@@ -19,6 +19,7 @@ use nib::integrations::mcp::McpManager;
 use nib::llm::factory::{provider_diagnostics, provider_ready, validate_provider_endpoints};
 use nib::profile::ProfileRegistry;
 use nib::sandbox;
+use nib::state_migration::relink::StateLinkKind;
 use nib::tools::executor::ApprovalHandler;
 use nib::tools::models::ApprovalDecision;
 use nib::tools::{PermissionLevel, ToolCall, ToolExecutor};
@@ -94,24 +95,61 @@ pub struct DoctorArgs {
     /// Attest that every prior nib binary is stopped and disabled, then migrate legacy subagent locks
     #[arg(long, requires = "fix")]
     pub confirm_no_legacy_processes: bool,
+
+    /// Move the nib state of the folder this project was moved from (its old
+    /// path, or the state key doctor lists) to this folder
+    #[arg(long, value_name = "OLD_FOLDER", requires = "fix")]
+    pub relink: Option<String>,
 }
 
 #[cfg(test)]
 pub fn run_doctor(project: &Path) -> bool {
-    run_doctor_inner(project, false, false)
+    run_doctor_with_args(project, &DoctorArgs::default())
 }
 
 pub fn run_doctor_with_args(project: &Path, args: &DoctorArgs) -> bool {
+    println!("nib doctor");
+    println!("==========");
+    println!("Build: {}", crate::version::version_display());
+    println!("LLM runtime: native Rust");
+    if let Some(from) = &args.relink {
+        print!("Re-linking nib state of {from}... ");
+        match nib::state_migration::relink::relink(project, from) {
+            Ok(outcome) => {
+                println!(
+                    "FIXED ({} sessions moved; state in {})",
+                    outcome.sessions_moved,
+                    outcome.state_dir.display()
+                );
+                for replaced in &outcome.replaced {
+                    println!(
+                        "  This folder's own earlier state was kept in {}",
+                        replaced.display()
+                    );
+                }
+                if let Some(receipts) = &outcome.receipts {
+                    println!(
+                        "  Worktree receipts naming the old folder were kept in {}",
+                        receipts.display()
+                    );
+                }
+                if let Some(repair) = &outcome.worktree_repair {
+                    println!("  {repair}");
+                }
+            }
+            Err(error) => {
+                println!("FAILED ({error})");
+                println!("==========");
+                println!("Doctor summary: Some checks FAILED.");
+                return false;
+            }
+        }
+    }
     run_doctor_inner(project, args.fix, args.confirm_no_legacy_processes)
 }
 
 #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn run_doctor_inner(project: &Path, fix: bool, confirm_no_legacy_processes: bool) -> bool {
-    println!("nib doctor");
-    println!("==========");
-    println!("Build: {}", crate::version::version_display());
-    println!("LLM runtime: native Rust");
-
     if fix {
         print!("Applying requested fixes... ");
         match repair_openai_transport(project) {
@@ -338,6 +376,8 @@ fn run_doctor_inner(project: &Path, fix: bool, confirm_no_legacy_processes: bool
         }
     };
 
+    print_layout(project);
+
     // 5. Skills Discoverability
     print!("Checking Skills discoverability... ");
     let mut shared_skill_paths = BTreeSet::new();
@@ -409,11 +449,19 @@ fn run_doctor_inner(project: &Path, fix: bool, confirm_no_legacy_processes: bool
             match (writable, session_store.list_result()) {
                 (true, Ok(session_ids)) => {
                     println!("OK (writable)");
-                    println!(
-                        "  Sessions: {} in {}",
-                        session_ids.len(),
-                        session_store.sessions_dir().display()
-                    );
+                    match session_store.database_path() {
+                        Some(database) => println!(
+                            "  Sessions: {} in {} (session directory {})",
+                            session_ids.len(),
+                            database.display(),
+                            session_store.sessions_dir().display()
+                        ),
+                        None => println!(
+                            "  Sessions: {} in {}",
+                            session_ids.len(),
+                            session_store.sessions_dir().display()
+                        ),
+                    }
                 }
                 (writable, listing) => {
                     println!("FAILED");
@@ -509,6 +557,81 @@ fn run_doctor_inner(project: &Path, fix: bool, confirm_no_legacy_processes: bool
     }
 
     all_passed
+}
+
+/// Reports where this project's nib files are (T082): the user home, the
+/// session database, the runtime state, older files left in the project and
+/// other states this folder may belong to. Nothing here fails the doctor.
+fn print_layout(project: &Path) {
+    print!("Checking nib layout... ");
+    let report = match nib::state_migration::relink::layout_report(project) {
+        Ok(report) => report,
+        Err(error) => {
+            println!("WARNING ({error})");
+            return;
+        }
+    };
+    let pending = report.user_home.is_some() && !report.state_in_user_home;
+    let interrupted = report.state_status.as_deref() == Some("moving");
+    let attention = pending
+        || interrupted
+        || report.candidates.iter().any(|candidate| {
+            matches!(
+                candidate.kind,
+                StateLinkKind::Moved | StateLinkKind::Interrupted
+            )
+        });
+    println!("{}", if attention { "WARNING" } else { "OK" });
+    match &report.user_home {
+        Some(home) => println!("  User home: {} (NIB_HOME overrides)", home.display()),
+        None => println!("  User home: unavailable (set NIB_HOME or HOME)"),
+    }
+    match (&report.database, report.sessions) {
+        (Some(database), Some(sessions)) => println!(
+            "  Session database: {} ({sessions} sessions of this folder)",
+            database.display()
+        ),
+        (Some(database), None) => println!("  Session database: {}", database.display()),
+        (None, _) => println!("  Session database: not created yet"),
+    }
+    println!(
+        "  Runtime state: {}{}",
+        report.state_dir.display(),
+        if pending {
+            " (the project's .nib; it moves to the user home once it is idle)"
+        } else if interrupted {
+            " (an interrupted move resumes the next time nib starts)"
+        } else {
+            ""
+        }
+    );
+    for line in &report.legacy {
+        println!("  Legacy: {line}");
+    }
+    for candidate in &report.candidates {
+        let root = candidate.recorded_root.display();
+        match candidate.kind {
+            StateLinkKind::Moved | StateLinkKind::Orphaned => println!(
+                "  {} {root} no longer exists; its nib state ({}, {} sessions) is still in {}. If this project was moved from there, run `nib doctor --fix --relink {root}`.",
+                if candidate.kind == StateLinkKind::Moved {
+                    "Moved?"
+                } else {
+                    "Orphaned:"
+                },
+                candidate.key,
+                candidate.sessions,
+                candidate.state_dir.display()
+            ),
+            StateLinkKind::Copied => println!(
+                "  Copy of {root}? nib keeps separate state for each folder; this one has its own."
+            ),
+            StateLinkKind::Interrupted => println!(
+                "  A re-link from {} to this folder was interrupted: run `nib doctor --fix --relink {}` to finish it.",
+                candidate.state_dir.display(),
+                candidate.key
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1041,8 +1164,10 @@ mod tests {
         save_nib_config_full(dir.path(), &mut config).expect("save config");
 
         assert!(run_doctor(dir.path()));
-        assert!(dir.path().join(".nib/profiles/default/sessions").is_dir());
+        let root = dir.path().canonicalize().expect("project");
+        assert!(nib::paths::NibPaths::profile_sessions(&root, "default").is_dir());
         assert!(!dir.path().join(".nib/sessions").exists());
+        assert!(!dir.path().join(".nib/profiles").exists());
         let store = nib::session::SessionStore::for_project(dir.path()).expect("session store");
         let session_ids = store.list_result().expect("doctor audit sessions");
         assert_eq!(session_ids.len(), 1);
@@ -1179,30 +1304,52 @@ mod tests {
         assert!(!run_doctor(dir.path()));
     }
 
-    #[test]
-    fn doctor_rejects_unreadable_session_listing() {
+    /// A project with one session in the session database, and a raw
+    /// connection to that database with the session's scope.
+    fn project_with_database_session(
+        id: &str,
+    ) -> (tempfile::TempDir, rusqlite::Connection, String) {
         let dir = tempdir().expect("tempdir");
         initialize_git(dir.path());
         let mut config = NibConfig::default();
         config.skills.enabled = false;
         save_nib_config_full(dir.path(), &mut config).expect("save config");
-        let sessions = dir.path().join(".nib/profiles/default/sessions");
-        std::fs::create_dir_all(&sessions).expect("sessions dir");
-        std::fs::write(sessions.join("invalid session id.json"), "{}").expect("invalid session");
+        let store = nib::session::SessionStore::for_project(dir.path()).expect("session store");
+        store.create_session_with_id(id);
+        let (key, profile) = nib::paths::NibPaths::database_session_scope(store.sessions_dir())
+            .expect("database session scope");
+        let connection =
+            rusqlite::Connection::open(nib::paths::NibPaths::session_database().expect("nib.db"))
+                .expect("session database");
+        (
+            dir,
+            connection,
+            format!("projects/{key}/profiles/{profile}/sessions"),
+        )
+    }
+
+    #[test]
+    fn doctor_rejects_unreadable_session_listing() {
+        let (dir, connection, scope) = project_with_database_session("listed-session");
+        connection
+            .execute(
+                "UPDATE sessions SET id = 'invalid session id' WHERE scope = ?1",
+                [&scope],
+            )
+            .expect("invalid session id");
 
         assert!(!run_doctor(dir.path()));
     }
 
     #[test]
     fn doctor_rejects_valid_named_corrupt_session() {
-        let dir = tempdir().expect("tempdir");
-        initialize_git(dir.path());
-        let mut config = NibConfig::default();
-        config.skills.enabled = false;
-        save_nib_config_full(dir.path(), &mut config).expect("save config");
-        let sessions = dir.path().join(".nib/profiles/default/sessions");
-        std::fs::create_dir_all(&sessions).expect("sessions dir");
-        std::fs::write(sessions.join("corrupt-session.json"), "not json").expect("corrupt session");
+        let (dir, connection, scope) = project_with_database_session("corrupt-session");
+        connection
+            .execute(
+                "UPDATE sessions SET document = 'not json' WHERE scope = ?1",
+                [&scope],
+            )
+            .expect("corrupt session");
 
         assert!(!run_doctor(dir.path()));
     }

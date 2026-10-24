@@ -38,16 +38,18 @@ fn run_with_input(project: &Path, args: &[&str], input: &[u8]) -> Output {
     child.wait_with_output().expect("wait for nib")
 }
 
+/// Sessions of the project's default profile, which live in nib's session
+/// database (T082); nothing is created when the profile has none yet.
 fn session_count(project: &Path) -> usize {
-    let sessions = project.join(".nib/profiles/default/sessions");
-    match std::fs::read_dir(sessions) {
-        Ok(entries) => entries
-            .filter_map(Result::ok)
-            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
-            .count(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
-        Err(error) => panic!("read session directory: {error}"),
+    let root = project.canonicalize().expect("canonical project");
+    let sessions = nib::paths::NibPaths::profile_sessions(&root, "default");
+    if !sessions.exists() {
+        return 0;
     }
+    nib::session::SessionStore::at_dir(sessions)
+        .list_result()
+        .expect("list sessions")
+        .len()
 }
 
 #[test]

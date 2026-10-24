@@ -120,11 +120,7 @@ fn parent_sigkill_after_ready_never_releases_worker_and_restart_cleans_everythin
     );
     assert!(!worktree.exists(), "restart left the prepared worktree");
     assert!(
-        !project
-            .path()
-            .join(".nib/profiles/default/sessions")
-            .join(format!("{id}.json"))
-            .exists(),
+        !default_session_exists(project.path(), &id),
         "restart left the prepared audit session"
     );
     wait_for_absence(
@@ -214,10 +210,7 @@ fn prepared_scope_restart_orders_late_supervisor_against_external_cleanup() {
         let owner_path = nib::paths::NibPaths::project_state(project.path())
             .join("subagent-owner-leases")
             .join(format!("{owner_lease}.lease"));
-        let audit_path = project
-            .path()
-            .join(".nib/profiles/default/sessions")
-            .join(format!("{id}.json"));
+        let audit_exists = || default_session_exists(project.path(), &id);
         let intent_path = nib::paths::NibPaths::project_state(project.path())
             .join("subagents/.preparations")
             .join(format!("{id}.json"));
@@ -231,7 +224,7 @@ fn prepared_scope_restart_orders_late_supervisor_against_external_cleanup() {
         assert!(!cleanup_lease_path.exists());
         assert!(worktree.exists());
         assert!(owner_path.exists());
-        assert!(audit_path.exists());
+        assert!(audit_exists());
         assert!(intent_path.exists());
         assert!(!worker_started.exists());
 
@@ -248,10 +241,7 @@ fn prepared_scope_restart_orders_late_supervisor_against_external_cleanup() {
         assert!(!cleanup_lease_path.exists());
         assert!(!worktree.exists(), "restart left the prepared worktree");
         assert!(!owner_path.exists(), "restart left owner authority");
-        assert!(
-            !audit_path.exists(),
-            "restart left the prepared audit session"
-        );
+        assert!(!audit_exists(), "restart left the prepared audit session");
         assert!(!intent_path.exists(), "restart left preparation authority");
         assert!(
             !worker_started.exists(),
@@ -266,7 +256,7 @@ fn prepared_scope_restart_orders_late_supervisor_against_external_cleanup() {
                     && !cleanup_lease_path.exists()
                     && !worktree.exists()
                     && !owner_path.exists()
-                    && !audit_path.exists()
+                    && !audit_exists()
                     && !intent_path.exists(),
                 "late supervisor recreated or retained launch resources"
             );
@@ -528,11 +518,7 @@ async fn supervisor_rebinds_scope_deadlines_after_long_running_handoff() {
             "terminal record lost its authoritative worktree"
         );
         assert!(
-            project
-                .path()
-                .join(".nib/profiles/default/sessions")
-                .join(format!("{id}.json"))
-                .is_file(),
+            default_session_exists(project.path(), &id),
             "terminal record lost its authoritative parent audit session"
         );
     }
@@ -656,6 +642,17 @@ fn cleanup_proof(record: &SubagentRecord) -> Option<&serde_json::Value> {
             .get("ownership_reconciliation")
             .and_then(|evidence| evidence.get("cleanup_proof"))
     })
+}
+
+/// Whether the project's default profile holds session `id` (a row of the
+/// session database since T082), without creating anything.
+fn default_session_exists(project: &Path, id: &str) -> bool {
+    let root = project.canonicalize().expect("canonical project");
+    nib::session::SessionStore::session_exists_at(
+        &nib::paths::NibPaths::profile_sessions(&root, "default"),
+        id,
+    )
+    .expect("inspect the audit session")
 }
 
 fn git_project() -> TempDir {

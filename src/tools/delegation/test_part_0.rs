@@ -211,12 +211,8 @@ fn killed_fallback_preparation_is_reconciled_without_orphans() {
         intent.is_file(),
         "write-ahead intent precedes crash boundary"
     );
-    let audit_session = root
-        .path()
-        .join(".nib/profiles/default/sessions")
-        .join(format!("{subagent_id}.json"));
     assert!(
-        audit_session.is_file(),
+        default_session_exists(root.path(), &subagent_id),
         "audit leaf is published before crash"
     );
 
@@ -228,7 +224,10 @@ fn killed_fallback_preparation_is_reconciled_without_orphans() {
         "preparing intent is never public workload"
     );
     assert!(!intent.exists(), "reconciled intent removed last");
-    assert!(!audit_session.exists(), "exact prepared audit leaf removed");
+    assert!(
+        !default_session_exists(root.path(), &subagent_id),
+        "exact prepared audit leaf removed"
+    );
     assert!(!owner_lease_directory(root.path())
         .read_dir()
         .is_ok_and(|mut entries| entries.next().is_some()));
@@ -298,11 +297,7 @@ fn killed_planned_intent_precedes_every_spawn_resource_and_reconciles() {
         "planned boundary precedes owner mutation"
     );
     assert!(
-        !root
-            .path()
-            .join(".nib/profiles/default/sessions")
-            .join(format!("{id}.json"))
-            .exists(),
+        !default_session_exists(root.path(), &id),
         "planned boundary precedes audit mutation"
     );
     child.kill().expect("kill planned child");
@@ -334,6 +329,18 @@ fn spawn_intent_and_session_atomic_phase_crashes_reconcile_exactly() {
         ] {
             let root = tempfile::tempdir().expect("project root");
             initialize_spawn_test_repository(root.path());
+            if component == "sessions" {
+                // Sessions in the session database commit in one
+                // transaction; the file publication phases belong to a
+                // profile whose sessions stay files.
+                use_file_sessions(root.path());
+            }
+            // The profile directory a configured profile already has; any
+            // other profile/session tree is the transaction's own.
+            let profile_dir = root.path().join(".nib/profiles/default");
+            let profile_before = profile_dir
+                .exists()
+                .then(|| directory_tree_snapshot(&profile_dir));
             let ready = root.path().join(format!("{category}-{phase}.ready"));
             let resume = root.path().join(format!("{category}-{phase}.resume"));
             let mut child =
@@ -388,15 +395,14 @@ fn spawn_intent_and_session_atomic_phase_crashes_reconcile_exactly() {
                 "{category}/{phase} worktree remained"
             );
             assert!(
-                !root
-                    .path()
-                    .join(".nib/profiles/default/sessions")
-                    .join(format!("{id}.json"))
-                    .exists(),
+                !default_session_exists(root.path(), &id),
                 "{category}/{phase} audit session remained"
             );
-            assert!(
-                !root.path().join(".nib/profiles/default").exists(),
+            assert_eq!(
+                profile_dir
+                    .exists()
+                    .then(|| directory_tree_snapshot(&profile_dir)),
+                profile_before,
                 "{category}/{phase} left the transaction-owned profile/session directory tree"
             );
             let namespace = subagent_namespace_snapshot(root.path());

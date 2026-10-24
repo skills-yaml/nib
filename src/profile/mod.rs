@@ -281,11 +281,22 @@ impl ProfileRegistry {
     pub fn load(base: &Path, config: &ProfilesConfig) -> Result<Self, ProfileError> {
         let registry = Self::resolve(base, config, None)?;
         migration::migrate_legacy_state(base, registry.default_profile())?;
-        if registry.migrate_project_state(base)? {
-            // The default state directories moved with the state.
+        let state_before = registry.state_locations();
+        if registry.migrate_project_state(base)? || registry.state_locations() != state_before {
+            // The default state directories moved with the state, or the
+            // migration recorded that this folder's state lives in the user
+            // home.
             return Self::resolve(base, config, None);
         }
         Ok(registry)
+    }
+
+    /// Where the project state of every profile root resolves now.
+    fn state_locations(&self) -> Vec<PathBuf> {
+        self.profiles
+            .values()
+            .map(|profile| crate::paths::NibPaths::project_state(&profile.root_path))
+            .collect()
     }
 
     /// Moves the legacy runtime state of the project and of every profile
@@ -846,7 +857,10 @@ mod tests {
             },
         )
         .expect("construct profile before state exists");
-        symlink(outside.path(), base.path().join(".nib")).expect("replace state ancestor");
+        // The project's state directory in the user home is replaced by a link.
+        let state = crate::paths::NibPaths::project_state(base.path());
+        std::fs::create_dir_all(state.parent().expect("projects")).expect("projects");
+        symlink(outside.path(), &state).expect("replace state ancestor");
 
         assert!(profile.ensure_state_dirs().is_err());
         assert!(!outside.path().join("profiles/raced").exists());

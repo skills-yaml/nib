@@ -178,8 +178,8 @@ impl Curator {
     ) -> Self {
         let state_dir = crate::paths::NibPaths::project_state(project_root);
         Self::at_profile_paths(
-            // Legacy sessions stay in the project until T082 phase 4, like
-            // `SessionStore::new`.
+            // The pre-profile session directory, like `SessionStore::new`;
+            // profiles use `at_profile_paths`.
             crate::paths::NibPaths::project_dir(project_root).join("sessions"),
             state_dir.join("memory.json"),
             state_dir.join("managed-skills"),

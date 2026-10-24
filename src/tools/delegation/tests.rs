@@ -341,6 +341,52 @@ pub(crate) fn assert_subagent_namespace_unchanged(
     );
 }
 
+/// Whether the default profile of a test project holds session `id`: a row
+/// of the session database, or a JSON file for a profile whose sessions stay
+/// files. Nothing is created.
+pub(crate) fn default_session_exists(root: &Path, id: &str) -> bool {
+    let root = root.canonicalize().expect("canonical test project");
+    let configured =
+        crate::paths::NibPaths::legacy_profile_state(&root, "default").join("sessions");
+    if configured.join(format!("{id}.json")).exists() {
+        return true;
+    }
+    session_exists_in(
+        &crate::paths::NibPaths::profile_sessions(&root, "default"),
+        id,
+    )
+}
+
+/// Whether the session directory `sessions` holds session `id`, in the
+/// session database or as a JSON file. Nothing is created.
+pub(crate) fn session_exists_in(sessions: &Path, id: &str) -> bool {
+    match crate::session::StoreDatabase::for_sessions_dir(sessions).expect("session database") {
+        Some(store) => store
+            .database
+            .load(&store.scope, id)
+            .expect("load audit session")
+            .is_some(),
+        None => sessions.join(format!("{id}.json")).exists(),
+    }
+}
+
+/// Configures the default profile of a test project with its state in
+/// `.nib/profiles/default`, as before T082, so its sessions stay JSON files
+/// whose atomic publication the crash tests observe.
+pub(crate) fn use_file_sessions(root: &Path) {
+    let mut config = crate::config::NibConfig::default();
+    config.profiles.active = vec![crate::config::ProfileConfig {
+        id: "default".to_string(),
+        root: PathBuf::from("."),
+        state_dir: Some(PathBuf::from(".nib/profiles/default")),
+        ..crate::config::ProfileConfig::default()
+    }];
+    crate::config::save_nib_config_full(root, &mut config).expect("file session profile");
+    // Load the profiles as every nib start does, which records where the
+    // project's state lives before anything runs.
+    crate::profile::ProfileRegistry::load(root, &config.profiles).expect("file session profiles");
+}
+
 pub(crate) fn initialize_spawn_test_repository(root: &Path) {
     for args in [
         vec!["init", "--quiet"],

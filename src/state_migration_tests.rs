@@ -1,5 +1,6 @@
 use super::*;
 use crate::paths::TestNibHome;
+use sha2::Digest;
 
 /// A project laid out the way versions before T082 left it: runtime state,
 /// a profile with sessions and state, a legacy worktree and preferences.
@@ -32,8 +33,18 @@ impl LegacyProject {
                 "profiles/default/.legacy-state-migration-v1.json",
                 "{\"version\":1,\"profile_id\":\"default\",\"session_count\":1,\"memory_copied\":true}",
             ),
-            ("profiles/default/sessions/s-1.json", "{\"id\":\"s-1\"}"),
+            ("profiles/default/sessions/s-1.json", &legacy_session("s-1", "first")),
+            ("profiles/default/sessions/s-2.json", &legacy_session("s-2", "second")),
+            ("profiles/default/sessions/broken.json", "{\"id\": \"broken\", "),
+            ("profiles/default/sessions/.session-directory.identity", ""),
+            ("profiles/default/sessions/.session-lock-07.lock", ""),
+            ("profiles/default/sessions/.session-run-s-1.lock", ""),
+            (
+                "profiles/default/.nib-lock-8-sessions-.session-directory.identity.anchor",
+                "",
+            ),
             ("profiles/default/checkpoints/s-1/index.json", "{}"),
+            ("profiles/default/file_reads/s-1.json", "{\"files\":[]}"),
             ("worktrees/sessions/old-1/README.md", "legacy worktree"),
             ("config.toml", "[llm]\nprovider = \"mock\"\n"),
             ("skills/review/SKILL.md", "# Review"),
@@ -62,6 +73,60 @@ impl LegacyProject {
     fn migrate(&self) -> Result<StateMigration, String> {
         migrate_project_state(&self.root, &[], &["default".to_string()])
     }
+}
+
+/// A session file as older versions wrote it, with messages and an event.
+fn legacy_session(id: &str, text: &str) -> String {
+    let mut session = crate::session::Session::new(id.to_string());
+    session.revision = 3;
+    session.summary = Some(format!("summary of {text}"));
+    for (index, (role, content)) in [("user", text), ("assistant", "done")].iter().enumerate() {
+        session.messages.push(crate::session::SessionMessage {
+            index,
+            role: (*role).to_string(),
+            content: (*content).to_string(),
+            timestamp: None,
+            attachments: Vec::new(),
+        });
+    }
+    session.events.push(crate::session::SessionEvent {
+        index: 0,
+        kind: "run_started".to_string(),
+        details: serde_json::json!({"text": text, "duration": 1.551_978_736_000_000_1_f64}),
+        timestamp: None,
+    });
+    serde_json::to_string_pretty(&session).expect("legacy session")
+}
+
+/// The sessions the database holds for a project's default profile.
+fn database_sessions(state: &Path) -> Vec<crate::session::Session> {
+    let key = state
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("key");
+    let store = crate::session::SessionStore::at_dir(
+        NibPaths::database_sessions_dir(key, "default").expect("sessions dir"),
+    );
+    store
+        .list()
+        .iter()
+        .map(|id| store.load(id).expect("session"))
+        .collect()
+}
+
+/// The `legacy-<time>` directories of a project's `.nib`.
+fn legacy_copies(legacy: &Path) -> Vec<PathBuf> {
+    let mut copies: Vec<PathBuf> = fs::read_dir(legacy)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with("legacy-"))
+                .map(|entry| entry.path())
+                .collect()
+        })
+        .unwrap_or_default();
+    copies.sort();
+    copies
 }
 
 /// Every file below `directory`, relative to it, with its bytes; a
@@ -93,8 +158,9 @@ fn files_below(directory: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     files
 }
 
-/// The legacy files the migration moves: everything but sessions and what
-/// belongs to them, legacy worktrees and preferences.
+/// The legacy files the migration moves: everything but the session
+/// directories (imported, then kept as a legacy copy) with their lock
+/// anchors, legacy worktrees and preferences.
 fn movable_files(legacy: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     files_below(legacy)
         .into_iter()
@@ -104,7 +170,20 @@ fn movable_files(legacy: &Path) -> Vec<(PathBuf, Vec<u8>)> {
                 && !text.starts_with("config.toml")
                 && !text.starts_with("skills")
                 && !text.contains("/sessions/")
-                && !text.contains("/checkpoints/")
+                && !text.contains("/.nib-lock-8-sessions-")
+        })
+        .collect()
+}
+
+/// The session directories and their lock anchors, which the migration
+/// keeps as a legacy copy once their sessions are in the database.
+fn session_files(legacy: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    files_below(legacy)
+        .into_iter()
+        .filter(|(path, _)| {
+            let text = path.to_string_lossy();
+            text.starts_with("profiles/")
+                && (text.contains("/sessions/") || text.contains("/.nib-lock-8-sessions-"))
         })
         .collect()
 }
@@ -138,6 +217,7 @@ fn a_populated_legacy_layout_moves_to_the_user_home_without_loss() {
     let _home = TestNibHome::isolated();
     let project = LegacyProject::new();
     let before = movable_files(&project.legacy());
+    let sessions_before = session_files(&project.legacy());
     #[cfg(unix)]
     let subagents_inode = {
         use std::os::unix::fs::MetadataExt;
@@ -166,10 +246,31 @@ fn a_populated_legacy_layout_moves_to_the_user_home_without_loss() {
             .ino();
         assert_eq!(moved_inode, subagents_inode);
     }
-    // Sessions, legacy worktrees and preferences stay in the project.
+    // Every readable session is in the database with the same content.
+    let imported = database_sessions(&project.state());
+    let expected: Vec<crate::session::Session> = ["s-1", "s-2"]
+        .iter()
+        .map(|id| {
+            let original = sessions_before
+                .iter()
+                .find(|(path, _)| path.ends_with(format!("{id}.json")))
+                .expect("original session");
+            serde_json::from_slice(&original.1).expect("original session JSON")
+        })
+        .collect();
+    assert_eq!(imported, expected);
+    assert!(moved
+        .iter()
+        .any(|entry| entry.starts_with("profiles/default/sessions")));
+    // The original session directory, with the file nib could not read, its
+    // locks and identity marker, is kept byte for byte in a legacy copy.
+    assert!(!project.legacy().join("profiles/default/sessions").exists());
+    let copies = legacy_copies(&project.legacy());
+    assert_eq!(copies.len(), 1, "{copies:?}");
+    let kept: Vec<(PathBuf, Vec<u8>)> = files_below(&copies[0].join("sessions"));
+    assert_eq!(kept, sessions_before);
+    // Legacy worktrees and preferences stay in the project.
     for kept in [
-        "profiles/default/sessions/s-1.json",
-        "profiles/default/checkpoints/s-1/index.json",
         "worktrees/sessions/old-1/README.md",
         "config.toml",
         "skills/review/SKILL.md",
@@ -191,6 +292,7 @@ fn a_second_run_changes_nothing() {
     let _home = TestNibHome::isolated();
     let project = LegacyProject::new();
     project.migrate().expect("first migration");
+    let sessions = database_sessions(&project.state());
     let state = files_below(&project.state());
     let legacy = files_below(&project.legacy());
 
@@ -198,6 +300,7 @@ fn a_second_run_changes_nothing() {
 
     assert_eq!(files_below(&project.state()), state);
     assert_eq!(files_below(&project.legacy()), legacy);
+    assert_eq!(database_sessions(&project.state()), sessions);
 }
 
 #[test]
@@ -234,10 +337,15 @@ fn an_interrupted_migration_resumes_and_keeps_identical_leftovers() {
         .unwrap();
     assert_eq!(record.status, "done");
     // The legacy duplicate is kept aside, not deleted.
-    assert_eq!(record.kept.len(), 1);
-    assert!(record.kept[0].starts_with(project.legacy()));
+    let duplicates: Vec<&PathBuf> = record
+        .kept
+        .iter()
+        .filter(|kept| kept.ends_with("state"))
+        .collect();
+    assert_eq!(duplicates.len(), 1);
+    assert!(duplicates[0].starts_with(project.legacy()));
     assert_eq!(
-        fs::read_to_string(record.kept[0].join("command-prefixes.json")).unwrap(),
+        fs::read_to_string(duplicates[0].join("command-prefixes.json")).unwrap(),
         "{\"rules\":[]}"
     );
     assert!(!project.legacy().join("command-prefixes.json").exists());
@@ -522,13 +630,16 @@ fn loading_profiles_moves_the_state_and_resolves_the_moved_profile() {
         profile.memory_store().user("style").as_deref(),
         Some("terse")
     );
-    // Sessions stay in the project until they move to SQLite.
+    // The sessions are in the session database, beside the moved state.
     assert_eq!(
         profile.sessions_dir(),
-        project.legacy().join("profiles/default/sessions")
+        project.state().join("profiles/default/sessions")
     );
-    assert!(profile.sessions_dir().join("s-1.json").is_file());
     profile.ensure_state_dirs().expect("state directories");
+    let store = crate::session::SessionStore::at_dir(profile.sessions_dir().to_path_buf());
+    assert_eq!(store.list(), vec!["s-1".to_string(), "s-2".to_string()]);
+    assert_eq!(store.load("s-1").expect("s-1").messages[0].content, "first");
+    assert!(!profile.sessions_dir().join("s-1.json").exists());
     assert!(project.state().join("subagents/sub-1.json").is_file());
     assert!(is_moved_marker(
         &project
@@ -542,4 +653,131 @@ fn loading_profiles_moves_the_state_and_resolves_the_moved_profile() {
     )
     .expect("profiles again");
     assert_eq!(again.default_profile(), profile);
+}
+
+#[test]
+fn an_interrupted_session_import_resumes_without_duplicates() {
+    let _home = TestNibHome::isolated();
+    let project = LegacyProject::new();
+    let sessions_before = session_files(&project.legacy());
+    // A run stopped after recording the move and importing `s-1`.
+    let state = project.state();
+    ensure_state_directory(&state).expect("state");
+    write_record(
+        &state.join(STATE_RECORD_FILE),
+        &new_record(&project.root, "moving"),
+    )
+    .expect("record");
+    let key = state.file_name().unwrap().to_str().unwrap();
+    let scope = crate::session::database::SessionScope::new(key, "default");
+    let database = crate::session::database::SessionDatabase::for_user_home().expect("database");
+    let first_bytes =
+        fs::read_to_string(project.legacy().join("profiles/default/sessions/s-1.json")).unwrap();
+    let first: crate::session::Session = serde_json::from_str(&first_bytes).unwrap();
+    let sha256: String = sha2::Sha256::digest(first_bytes.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    database
+        .import(
+            &scope,
+            &first,
+            &project.legacy().join("profiles/default/sessions/s-1.json"),
+            &sha256,
+            std::time::SystemTime::now(),
+        )
+        .expect("partial import");
+
+    let outcome = project.migrate().expect("resumed migration");
+
+    assert!(matches!(outcome, StateMigration::Moved(_)), "{outcome:?}");
+    let imported = database_sessions(&state);
+    let ids: Vec<&str> = imported.iter().map(|session| session.id.as_str()).collect();
+    assert_eq!(ids, ["s-1", "s-2"]);
+    assert_eq!(imported[0], first);
+    let copies = legacy_copies(&project.legacy());
+    assert_eq!(files_below(&copies[0].join("sessions")), sessions_before);
+    assert_eq!(project.migrate(), Ok(StateMigration::Current));
+    assert_eq!(database_sessions(&state).len(), 2);
+}
+
+#[test]
+fn a_session_the_database_holds_differently_stops_the_first_migration() {
+    let _home = TestNibHome::isolated();
+    let project = LegacyProject::new();
+    let state = project.state();
+    let key = state.file_name().unwrap().to_str().unwrap().to_string();
+    let other = crate::session::SessionStore::at_dir(
+        NibPaths::database_sessions_dir(&key, "default").unwrap(),
+    );
+    let mut different = other.create_session_with_id("s-2");
+    different.summary = Some("written elsewhere".to_string());
+    other.save(&mut different).expect("different session");
+    let legacy = files_below(&project.legacy());
+
+    let error = project.migrate().expect_err("conflict");
+
+    assert!(error.contains("s-2.json"), "{error}");
+    assert!(error.contains("nothing was moved"), "{error}");
+    assert_eq!(files_below(&project.legacy()), legacy);
+    assert!(!state.join(STATE_RECORD_FILE).exists());
+    assert_eq!(
+        other.load("s-2").unwrap().summary.as_deref(),
+        Some("written elsewhere")
+    );
+    assert!(other.load_result("s-1").unwrap().is_none());
+}
+
+#[test]
+fn a_session_run_in_progress_defers_the_session_import() {
+    let _home = TestNibHome::isolated();
+    let project = LegacyProject::new();
+    let sessions = project.legacy().join("profiles/default/sessions");
+    let lease = crate::daemons::state::try_acquire_file_lock_in(
+        &sessions.join(".session-run-s-1.lock"),
+        &sessions,
+    )
+    .expect("run lease");
+
+    let outcome = project.migrate().expect("deferred");
+
+    assert!(
+        matches!(&outcome, StateMigration::Deferred(reason) if reason.contains("session run is active")),
+        "{outcome:?}"
+    );
+    assert!(sessions.join("s-1.json").is_file());
+    assert_eq!(NibPaths::project_state(&project.root), project.legacy());
+    drop(lease);
+    assert!(matches!(project.migrate(), Ok(StateMigration::Moved(_))));
+    assert_eq!(database_sessions(&project.state()).len(), 2);
+}
+
+#[test]
+fn pre_profile_sessions_reach_the_session_database() {
+    let _home = TestNibHome::isolated();
+    let directory = tempfile::tempdir().expect("project");
+    let root = directory.path().canonicalize().unwrap();
+    let legacy = NibPaths::project_dir(&root);
+    fs::create_dir_all(legacy.join("sessions")).unwrap();
+    fs::write(
+        legacy.join("sessions/old-1.json"),
+        legacy_session("old-1", "before profiles"),
+    )
+    .unwrap();
+    assert!(NibPaths::has_legacy_state(&root));
+
+    let registry =
+        crate::profile::ProfileRegistry::load(&root, &crate::config::ProfilesConfig::default())
+            .expect("profiles");
+
+    let state = NibPaths::user_state_dir(&root).unwrap();
+    assert_eq!(
+        registry.default_profile().sessions_dir(),
+        state.join("profiles/default/sessions")
+    );
+    let sessions = database_sessions(&state);
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].messages[0].content, "before profiles");
+    // The profile migration never removes its sources.
+    assert!(legacy.join("sessions/old-1.json").is_file());
 }

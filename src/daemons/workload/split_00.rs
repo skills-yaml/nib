@@ -355,10 +355,9 @@ impl DurableTaskStore {
         Self::at_daemon_dir(Self::profile_daemon_dir(sessions_dir)?)
     }
 
-    /// The daemon directory of the profile that owns `sessions_dir`. Since
-    /// T082 a default profile keeps its state in nib's user home while its
-    /// sessions stay in the project, so the profile is resolved; sessions
-    /// outside a configured workspace keep their state beside them.
+    /// The daemon directory of the profile that owns `sessions_dir`: the
+    /// profile is resolved, also for sessions in nib's user home (T082);
+    /// sessions outside a configured workspace keep their state beside them.
     pub(crate) fn profile_daemon_dir(sessions_dir: &Path) -> Result<PathBuf, String> {
         if let Ok(profile) = Self::resolve_profile(sessions_dir) {
             return Ok(profile.daemon_dir().to_path_buf());
@@ -378,7 +377,14 @@ impl DurableTaskStore {
         let sessions_dir = sessions_dir
             .canonicalize()
             .map_err(|error| format!("failed to resolve originating sessions: {error}"))?;
-        for candidate in sessions_dir.ancestors().skip(1) {
+        // Sessions in nib's user home belong to the project its state
+        // directory records (T082).
+        let owner = crate::paths::NibPaths::state_owner(&sessions_dir);
+        for candidate in owner
+            .iter()
+            .map(PathBuf::as_path)
+            .chain(sessions_dir.ancestors().skip(1))
+        {
             if !crate::paths::NibPaths::project_dir(candidate).is_dir() {
                 continue;
             }

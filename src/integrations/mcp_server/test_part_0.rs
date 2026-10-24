@@ -1001,7 +1001,8 @@ async fn direct_executor_uses_selected_profile_store_and_environment() {
         "profile-scoped"
     );
     let store = SessionStore::for_project(root.path()).expect("profile store");
-    let expected_sessions = root.path().join(".nib/profiles/workspace/sessions");
+    let expected_sessions =
+        crate::paths::NibPaths::profile_sessions(&root.path().canonicalize().unwrap(), "workspace");
     assert!(
         crate::fs_security::canonical_paths_match(store.sessions_dir(), &expected_sessions),
         "profile store {} does not match expected sessions path {}",

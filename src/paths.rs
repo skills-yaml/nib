@@ -295,8 +295,11 @@ impl NibPaths {
         if !std::fs::symlink_metadata(&legacy).is_ok_and(|metadata| metadata.is_dir()) {
             return false;
         }
+        // `sessions` is the pre-profile session directory, which the profile
+        // migration copies into the default profile before this state moves.
         if LEGACY_STATE_ENTRIES
             .iter()
+            .chain(std::iter::once(&LEGACY_PROFILE_SESSIONS))
             .any(|entry| std::fs::symlink_metadata(legacy.join(entry)).is_ok())
         {
             return true;
@@ -304,6 +307,8 @@ impl NibPaths {
         let Ok(profiles) = std::fs::read_dir(legacy.join(PROFILES_DIR)) else {
             return false;
         };
+        // The "state moved" marker the migration leaves for older versions
+        // is not legacy state (a copied project carries it along).
         profiles
             .filter_map(Result::ok)
             .take(MAX_LEGACY_PROFILE_DIRS)
@@ -311,7 +316,11 @@ impl NibPaths {
                 LEGACY_PROFILE_STATE_ENTRIES
                     .iter()
                     .chain(std::iter::once(&LEGACY_PROFILE_SESSIONS))
-                    .any(|entry| std::fs::symlink_metadata(profile.path().join(entry)).is_ok())
+                    .map(|entry| profile.path().join(entry))
+                    .any(|path| {
+                        std::fs::symlink_metadata(&path).is_ok()
+                            && !crate::state_migration::is_moved_marker(&path)
+                    })
             })
     }
 
@@ -438,6 +447,21 @@ impl NibPaths {
         }
         let root = recorded_root(&state.join(PROJECT_IDENTITY_FILE))?;
         (Self::state_key(&root).as_deref() == state.file_name()?.to_str()).then_some(root)
+    }
+
+    /// The folder whose user-home state directory holds `path`: the root
+    /// recorded in `<user home>/projects/<key>/project.toml`, accepted only
+    /// when that root's state key is `<key>`.
+    pub fn state_owner(path: &Path) -> Option<PathBuf> {
+        let projects = projects_dir(Self::state_home()?);
+        let path = crate::fs_security::absolute_path(path).ok()?;
+        let path = path.canonicalize().unwrap_or(path);
+        let key = path.strip_prefix(&projects).ok()?.components().next()?;
+        let std::path::Component::Normal(key) = key else {
+            return None;
+        };
+        let root = recorded_root(&projects.join(key).join(PROJECT_IDENTITY_FILE))?;
+        (Self::state_key(&root).as_deref() == key.to_str()).then_some(root)
     }
 
     /// A profile state directory inside a worktree, relative to it. A

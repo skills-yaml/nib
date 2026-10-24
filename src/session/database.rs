@@ -554,9 +554,40 @@ impl SessionDatabase {
         Ok(true)
     }
 
-    /// Imports one JSON session file into `scope`, in one transaction. An
-    /// identical session already there (an interrupted import) is accepted;
-    /// a different one is a conflict and nothing changes.
+    /// What importing a JSON session file would do, without writing:
+    /// - `AlreadyImported` when the import ledger records this exact file
+    ///   (`sha256`) for the session, whatever the session became since, or
+    ///   when the stored session is identical;
+    /// - `Conflict` when the scope holds a different session with this id;
+    /// - `Imported` when the session is not there yet.
+    pub(crate) fn import_status(
+        &self,
+        scope: &SessionScope,
+        session: &Session,
+        sha256: &str,
+    ) -> Result<ImportOutcome, SessionError> {
+        let ledger: Option<String> = self
+            .connection()?
+            .query_row(
+                "SELECT sha256 FROM session_imports WHERE scope = ?1 AND session_id = ?2",
+                params![scope.scope, session.id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| database_error(&self.path, error))?;
+        if ledger.as_deref() == Some(sha256) {
+            return Ok(ImportOutcome::AlreadyImported);
+        }
+        Ok(match self.load(scope, &session.id)? {
+            None => ImportOutcome::Imported,
+            Some(stored) if stored.session == *session => ImportOutcome::AlreadyImported,
+            Some(_) => ImportOutcome::Conflict,
+        })
+    }
+
+    /// Imports one JSON session file into `scope`, in one transaction with
+    /// its import ledger entry. A file already imported (see
+    /// [`Self::import_status`]) is accepted again; a conflict changes nothing.
     pub(crate) fn import(
         &self,
         scope: &SessionScope,
@@ -565,13 +596,13 @@ impl SessionDatabase {
         sha256: &str,
         modified: SystemTime,
     ) -> Result<ImportOutcome, SessionError> {
-        if let Some(stored) = self.load(scope, &session.id)? {
-            return Ok(if stored.session == *session {
+        match self.import_status(scope, session, sha256)? {
+            ImportOutcome::Imported => {}
+            ImportOutcome::AlreadyImported => {
                 self.record_import(scope, &session.id, source, sha256)?;
-                ImportOutcome::AlreadyImported
-            } else {
-                ImportOutcome::Conflict
-            });
+                return Ok(ImportOutcome::AlreadyImported);
+            }
+            ImportOutcome::Conflict => return Ok(ImportOutcome::Conflict),
         }
         let encoded = EncodedSession::encode(session)?;
         let byte_len = i64::try_from(encoded.byte_len()).unwrap_or(i64::MAX);

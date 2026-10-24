@@ -329,6 +329,23 @@ impl SessionStore {
         &self.sessions_dir
     }
 
+    /// Whether the session directory `sessions_dir` holds session `id`, in
+    /// the session database or as a JSON file, without creating anything.
+    pub fn session_exists_at(sessions_dir: &Path, id: &str) -> Result<bool, SessionError> {
+        match StoreDatabase::for_sessions_dir(sessions_dir).map_err(SessionError::Database)? {
+            Some(store) => Ok(store.database.load(&store.scope, id)?.is_some()),
+            None => Ok(crate::fs_security::path_entry_exists(
+                &sessions_dir.join(format!("{id}.json")),
+            )?),
+        }
+    }
+
+    /// The session database holding this store's sessions, when they are
+    /// not JSON files in [`Self::sessions_dir`] (T082 phase 4).
+    pub fn database_path(&self) -> Option<&Path> {
+        self.database.as_ref().map(|store| store.database.path())
+    }
+
     pub(crate) fn persistent_directory_identity(
         &self,
     ) -> Result<crate::fs_security::FileIdentitySnapshot, SessionError> {

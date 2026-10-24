@@ -1,12 +1,16 @@
-//! T082 phase 3: moves a project's runtime state out of `<project>/.nib`.
+//! T082 phases 3 and 4: moves a project's runtime state out of
+//! `<project>/.nib`.
 //!
 //! Older versions kept memory, daemons, plans, subagent records, process
 //! scopes, owner leases, worktree receipts and remembered command prefixes in
-//! the project's own `.nib`, and each profile's memory, context, daemons and
-//! managed skills in `.nib/profiles/<id>`. This module moves them to the
-//! project's user-home state directory (`~/.nib/projects/<key>`). Sessions,
-//! and what belongs to them, stay until the SQLite sessions of phase 4;
-//! managed worktrees created by older versions stay where they are.
+//! the project's own `.nib`, and each profile's memory, context, daemons,
+//! managed skills, checkpoints, read ledgers, presence and sessions in
+//! `.nib/profiles/<id>`. This module moves them to the project's user-home
+//! state directory (`~/.nib/projects/<key>`) and imports the JSON sessions
+//! into the session database (`~/.nib/nib.db`, see
+//! [`sessions`]); the original session files are kept in
+//! `<project>/.nib/legacy-<time>/sessions/`. Managed worktrees created by
+//! older versions stay where they are.
 //!
 //! The migration runs when a project's profiles are loaded and is:
 //! - **lossless**: every entry is renamed, never copied, so its content and
@@ -16,9 +20,10 @@
 //!   then kept under `<project>/.nib/legacy-<time>/state/`. Anything else
 //!   stops the migration before it changes anything;
 //! - **deferred while the state is in use**: a live session heartbeat, a
-//!   subagent owner lease or a recorded managed process leaves the state in
-//!   place, and [`crate::paths::NibPaths::project_state`] keeps resolving to
-//!   it, until a later run finds the project idle;
+//!   held session run lease, a subagent owner lease or a recorded managed
+//!   process leaves the state in place, and
+//!   [`crate::paths::NibPaths::project_state`] keeps resolving to it, until a
+//!   later run finds the project idle;
 //! - **resumable and idempotent**: a state record written before the first
 //!   move makes every later run resolve to the user home, and each run moves
 //!   whatever legacy entries are still left;
@@ -28,8 +33,8 @@
 //! the state then stays in the project and the migration says why.
 
 use crate::paths::{
-    NibPaths, LEGACY_PROFILE_STATE_ENTRIES, LEGACY_STATE_ENTRIES, PROJECT_IDENTITY_FILE,
-    STATE_RECORD_FILE,
+    NibPaths, LEGACY_PROFILE_SESSIONS, LEGACY_PROFILE_STATE_ENTRIES, LEGACY_STATE_ENTRIES,
+    PROJECT_IDENTITY_FILE, STATE_RECORD_FILE,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -91,9 +96,14 @@ struct StateRecord {
     /// Entries moved from the project, relative to its `.nib`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     moved: Vec<String>,
-    /// Where legacy duplicates of already-moved entries were kept.
+    /// Where legacy duplicates of already-moved entries and the original
+    /// session files were kept.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     kept: Vec<PathBuf>,
+    /// Session directories imported into the session database, with the
+    /// number of sessions each held.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    imported: Vec<String>,
 }
 
 /// Version of the "state moved" marker. Older versions accept only
@@ -215,18 +225,39 @@ fn migrate_locked(
     keep: &[PathBuf],
     profiles: &[String],
 ) -> Result<StateMigration, String> {
+    relink::finish_pending(state)?;
     record_identity(state, root)?;
     let legacy = NibPaths::project_dir(root);
     // A `.nib` that is a symbolic link may point at another project's state;
     // it is never moved (and never used, see `NibPaths::has_legacy_state`).
-    let mut moves = if NibPaths::has_legacy_state(root) {
+    let has_legacy = NibPaths::has_legacy_state(root);
+    let mut moves = if has_legacy {
         legacy_moves(&legacy, state, keep)?
+    } else {
+        Vec::new()
+    };
+    let state_key = state
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("nib's state directory {} has no key", state.display()))?;
+    let open_database = || {
+        crate::session::database::SessionDatabase::for_user_home()
+            .map_err(|error| error.to_string())
+    };
+    let mut imports = if has_legacy {
+        sessions::plan(
+            &legacy,
+            state_key,
+            keep,
+            &legacy_profile_ids(&legacy)?,
+            &open_database,
+        )?
     } else {
         Vec::new()
     };
     let record_path = state.join(STATE_RECORD_FILE);
     let existing = read_record(&record_path)?;
-    if moves.is_empty() {
+    if moves.is_empty() && imports.is_empty() {
         if existing.is_none() {
             write_record(&record_path, &new_record(root, "done"))?;
         }
@@ -235,17 +266,36 @@ fn migrate_locked(
     if let Some(reason) = live_activity(&legacy) {
         return Ok(StateMigration::Deferred(reason));
     }
-    let (duplicates, left) = classify_destinations(&moves, existing.is_some())?;
+    let (duplicates, mut left) = classify_destinations(&moves, existing.is_some())?;
     moves.retain(|entry| !left.contains(&entry.relative));
-    if moves.is_empty() {
+    let conflicts: Vec<String> = imports
+        .iter()
+        .flat_map(|import| &import.conflicts)
+        .map(|path| path.display().to_string())
+        .collect();
+    if !conflicts.is_empty() {
+        if existing.is_none() {
+            return Err(format!(
+                "nib cannot import {}: the session database already holds different sessions with these ids; nothing was moved. Compare them and remove the one you do not need.",
+                conflicts.join(", ")
+            ));
+        }
+        for import in imports.iter().filter(|import| !import.conflicts.is_empty()) {
+            left.push(import.relative.clone());
+        }
+        imports.retain(|import| import.conflicts.is_empty());
+    }
+    if moves.is_empty() && imports.is_empty() {
         return Ok(StateMigration::Deferred(left_reason(&legacy, &left)));
     }
-    if let Err(error) = probe_rename(&legacy, state) {
-        return Ok(StateMigration::Deferred(format!(
-            "nib's user home {} cannot take a rename from {} ({error}); the runtime state stays in the project",
-            state.display(),
-            legacy.display()
-        )));
+    if !moves.is_empty() {
+        if let Err(error) = probe_rename(&legacy, state) {
+            return Ok(StateMigration::Deferred(format!(
+                "nib's user home {} cannot take a rename from {} ({error}); the runtime state stays in the project",
+                state.display(),
+                legacy.display()
+            )));
+        }
     }
 
     // From here on the project resolves to the user home, so no process
@@ -254,18 +304,18 @@ fn migrate_locked(
     record.status = "moving".to_string();
     record.completed_at = None;
     write_record(&record_path, &record)?;
-    let backup = (!duplicates.is_empty()).then(|| legacy_backup_dir(&legacy));
+    let backup = legacy_backup_dir(&legacy);
     let mut moved = Vec::new();
     for entry in &moves {
         let relative = entry.relative.display().to_string();
         if duplicates.contains(&entry.relative) {
-            let backup = backup.as_ref().expect("a backup for duplicates");
-            let kept = backup.join(&entry.relative);
+            let kept_root = backup.join("state");
+            let kept = kept_root.join(&entry.relative);
             create_parent(&kept, false)?;
             rename_no_replace(&entry.source, &kept)
                 .map_err(|error| move_error(&entry.source, &kept, &error))?;
-            if !record.kept.contains(backup) {
-                record.kept.push(backup.clone());
+            if !record.kept.contains(&kept_root) {
+                record.kept.push(kept_root);
             }
         } else {
             create_parent(&entry.destination, true)?;
@@ -279,6 +329,12 @@ fn migrate_locked(
         }
         moved.push(relative);
     }
+    if !imports.is_empty() {
+        let database = open_database()?;
+        for import in &imports {
+            moved.push(import_directory(import, &database, &backup, &mut record)?);
+        }
+    }
     for profile in profiles {
         write_moved_marker(&legacy, state, profile)?;
     }
@@ -289,6 +345,80 @@ fn migrate_locked(
         tracing::warn!("{}", left_reason(&legacy, &left));
     }
     Ok(StateMigration::Moved(moved))
+}
+
+/// Imports the sessions of one legacy session directory, then keeps the
+/// directory (the original files, locks and identity marker) and its lock
+/// anchors under `<backup>/sessions/`. Returns what it reports as moved.
+fn import_directory(
+    import: &sessions::SessionDirImport,
+    database: &crate::session::database::SessionDatabase,
+    backup: &Path,
+    record: &mut StateRecord,
+) -> Result<String, String> {
+    let imported = sessions::import_sessions(import, database)?;
+    for (path, reason) in &import.unreadable {
+        tracing::warn!(
+            "nib could not import {} ({reason}); it is kept with the original sessions",
+            path.display()
+        );
+    }
+    let kept_root = backup.join("sessions");
+    let kept = kept_root.join(&import.relative);
+    create_parent(&kept, false)?;
+    let anchors = import
+        .source
+        .parent()
+        .map(sessions::session_lock_anchors)
+        .unwrap_or_default();
+    rename_no_replace(&import.source, &kept)
+        .map_err(|error| move_error(&import.source, &kept, &error))?;
+    sync_parent(&import.source);
+    sync_parent(&kept);
+    if let Some(kept_parent) = kept.parent() {
+        for anchor in anchors {
+            if let Some(name) = anchor.file_name() {
+                let destination = kept_parent.join(name);
+                rename_no_replace(&anchor, &destination)
+                    .map_err(|error| move_error(&anchor, &destination, &error))?;
+            }
+        }
+        sync_parent(&kept);
+    }
+    let relative = import.relative.display().to_string();
+    let summary = format!(
+        "{relative}: {} sessions in the session database ({imported} imported now), {} unreadable files kept",
+        import.sessions(),
+        import.unreadable.len()
+    );
+    record.imported.push(summary);
+    if !record.kept.contains(&kept_root) {
+        record.kept.push(kept_root);
+    }
+    Ok(format!(
+        "{relative} ({} sessions imported)",
+        import.sessions()
+    ))
+}
+
+/// The profile folders of a legacy `.nib`, sorted.
+fn legacy_profile_ids(legacy: &Path) -> Result<Vec<std::ffi::OsString>, String> {
+    let profiles = legacy.join("profiles");
+    let entries = match fs::read_dir(&profiles) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("cannot read {}: {error}", profiles.display())),
+    };
+    let mut ids = Vec::new();
+    for entry in entries.take(MAX_PROFILE_DIRS) {
+        let entry =
+            entry.map_err(|error| format!("cannot read {}: {error}", profiles.display()))?;
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            ids.push(entry.file_name());
+        }
+    }
+    ids.sort();
+    Ok(ids)
 }
 
 /// Splits the entries whose destination already exists into identical
@@ -400,22 +530,7 @@ fn legacy_moves(legacy: &Path, state: &Path, keep: &[PathBuf]) -> Result<Vec<Mov
     for entry in LEGACY_STATE_ENTRIES {
         add(PathBuf::from(entry))?;
     }
-    let profiles = legacy.join("profiles");
-    let entries = match fs::read_dir(&profiles) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(moves),
-        Err(error) => return Err(format!("cannot read {}: {error}", profiles.display())),
-    };
-    let mut ids = Vec::new();
-    for entry in entries.take(MAX_PROFILE_DIRS) {
-        let entry =
-            entry.map_err(|error| format!("cannot read {}: {error}", profiles.display()))?;
-        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-            ids.push(entry.file_name());
-        }
-    }
-    ids.sort();
-    for id in ids {
+    for id in legacy_profile_ids(legacy)? {
         for entry in LEGACY_PROFILE_STATE_ENTRIES {
             add(Path::new("profiles").join(&id).join(entry))?;
         }
@@ -448,6 +563,13 @@ fn live_activity(legacy: &Path) -> Option<String> {
                 presence.display()
             ));
         }
+        let sessions = profile.path().join(LEGACY_PROFILE_SESSIONS);
+        if let Some(lease) = sessions::held_run_lease(&sessions) {
+            return Some(format!(
+                "a nib session run is active in this project ({}); the runtime state moves once it has ended",
+                lease.display()
+            ));
+        }
     }
     None
 }
@@ -465,14 +587,13 @@ fn probe_rename(legacy: &Path, state: &Path) -> io::Result<()> {
     result
 }
 
-/// `<project>/.nib/legacy-<time>/state`, for legacy duplicates.
+/// `<project>/.nib/legacy-<time>`: legacy duplicates go to its `state/`,
+/// the original session files to its `sessions/`.
 fn legacy_backup_dir(legacy: &Path) -> PathBuf {
-    legacy
-        .join(format!(
-            "{LEGACY_DIRECTORY_PREFIX}{}",
-            chrono::Utc::now().format("%Y%m%dT%H%M%S%.6fZ")
-        ))
-        .join("state")
+    legacy.join(format!(
+        "{LEGACY_DIRECTORY_PREFIX}{}",
+        chrono::Utc::now().format("%Y%m%dT%H%M%S%.6fZ")
+    ))
 }
 
 fn create_parent(path: &Path, private: bool) -> Result<(), String> {
@@ -565,6 +686,7 @@ fn new_record(root: &Path, status: &str) -> StateRecord {
         completed_at: (status == "done").then(|| chrono::Utc::now().to_rfc3339()),
         moved: Vec::new(),
         kept: Vec::new(),
+        imported: Vec::new(),
     }
 }
 
@@ -673,6 +795,12 @@ fn sync_parent(path: &Path) {
     #[cfg(not(unix))]
     let _ = path;
 }
+
+#[path = "state_migration_sessions.rs"]
+mod sessions;
+
+#[path = "state_relink.rs"]
+pub mod relink;
 
 #[cfg(test)]
 #[path = "state_migration_tests.rs"]

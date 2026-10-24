@@ -46,19 +46,68 @@ pub(super) fn migrate_legacy_state(base: &Path, profile: &Profile) -> Result<(),
         false
     };
 
+    // A profile whose sessions live in the session database (T082 phase 4)
+    // receives the legacy sessions as rows instead of files.
+    let database = crate::session::StoreDatabase::for_sessions_dir(profile.sessions_dir())
+        .map_err(migration_error)?;
+    let (session_rows, files): (Vec<CopyCandidate>, Vec<CopyCandidate>) =
+        candidates.into_iter().partition(|candidate| {
+            database.is_some() && candidate.destination.parent() == Some(profile.sessions_dir())
+        });
+    let mut rows = Vec::with_capacity(session_rows.len());
+    if let Some(store) = &database {
+        for candidate in session_rows {
+            let session: Session = serde_json::from_slice(&candidate.bytes).map_err(|error| {
+                migration_error(format!(
+                    "failed to parse legacy session {}: {error}",
+                    candidate.source.display()
+                ))
+            })?;
+            let sha256 = sha256_hex(&candidate.bytes);
+            if store
+                .database
+                .import_status(&store.scope, &session, &sha256)
+                .map_err(|error| migration_error(error.to_string()))?
+                == crate::session::database::ImportOutcome::Conflict
+            {
+                return Err(migration_error(format!(
+                    "migration conflict: the session database holds a different session {} than legacy source {}",
+                    session.id,
+                    candidate.source.display()
+                )));
+            }
+            rows.push((candidate.source, session, sha256));
+        }
+    }
+
     // Detect every conflict before copying anything. A previous interrupted migration
     // may have left identical complete files, which are safe to resume.
-    for candidate in &candidates {
+    for candidate in &files {
         validate_existing_destination(candidate)?;
     }
-    for candidate in &candidates {
+    for candidate in &files {
         atomic_create_or_verify(candidate)?;
     }
+    if let Some(store) = &database {
+        for (source, session, sha256) in &rows {
+            store
+                .database
+                .import(
+                    &store.scope,
+                    session,
+                    source,
+                    sha256,
+                    std::time::SystemTime::now(),
+                )
+                .map_err(|error| migration_error(error.to_string()))?;
+        }
+    }
+    let session_count = files.len() - usize::from(memory_copied) + rows.len();
 
     let marker = MigrationMarker {
         version: MIGRATION_VERSION,
         profile_id: profile.id().to_string(),
-        session_count: candidates.len() - usize::from(memory_copied),
+        session_count,
         memory_copied,
     };
     let marker_bytes = serde_json::to_vec_pretty(&marker)
@@ -406,6 +455,14 @@ fn path_exists(path: &Path) -> Result<bool, ProfileError> {
     }
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 fn migration_error(message: impl Into<String>) -> ProfileError {
     ProfileError::Migration(message.into())
 }
@@ -446,11 +503,11 @@ mod tests {
         let registry = ProfileRegistry::load(root.path(), &ProfilesConfig::default())
             .expect("migrate legacy state");
         let profile = registry.default_profile();
-        let destination_session = profile.sessions_dir().join("legacy.json");
-        assert_eq!(
-            fs::read(&destination_session).expect("migrated session"),
-            legacy_session
-        );
+        // The project's sessions live in the session database (T082 phase 4).
+        let store = crate::session::SessionStore::at_dir(profile.sessions_dir().to_path_buf());
+        assert!(store.database.is_some());
+        let original: Session = serde_json::from_slice(&legacy_session).expect("legacy JSON");
+        assert_eq!(store.load("legacy").expect("migrated session"), original);
         assert_eq!(
             fs::read(profile.memory_path()).expect("migrated memory"),
             legacy_memory
@@ -472,10 +529,7 @@ mod tests {
         fs::write(&legacy_session_path, changed_legacy).expect("change legacy source");
         ProfileRegistry::load(root.path(), &ProfilesConfig::default())
             .expect("marker makes migration one-time");
-        assert_eq!(
-            fs::read(destination_session).expect("unchanged destination"),
-            legacy_session
-        );
+        assert_eq!(store.load("legacy").expect("unchanged session"), original);
     }
 
     #[test]
@@ -568,13 +622,10 @@ mod tests {
 
         let registry = ProfileRegistry::load(root.path(), &ProfilesConfig::default())
             .expect("migrate pre-index state");
-        let destination = registry
-            .default_profile()
-            .sessions_dir()
-            .join("pre-index.json");
-        let migrated: Session =
-            serde_json::from_slice(&fs::read(destination).expect("read migrated session"))
-                .expect("parse migrated session");
+        let store = crate::session::SessionStore::at_dir(
+            registry.default_profile().sessions_dir().to_path_buf(),
+        );
+        let migrated = store.load("pre-index").expect("read migrated session");
 
         migrated.validate().expect("strict current invariants");
         assert_eq!(migrated.messages[0].index, 0);

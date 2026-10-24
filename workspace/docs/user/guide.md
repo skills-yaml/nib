@@ -70,8 +70,8 @@ but is explicitly ineligible as proof of a published exact-revision artifact.
 
 Run `nib` from the configured profile root, normally the Git top-level directory.
 Running from a nested directory can select a different config root. nib keeps
-configuration only you may set, and a project's runtime state, in its user home;
-the project's own `.nib` holds its preferences and, for now, its sessions:
+configuration only you may set, a project's runtime state and its sessions in its
+user home; the project's own `.nib` holds only its preferences:
 
 - `~/.nib/config.toml`: your user configuration for every project: provider
   credentials, endpoints and transports, default provider and model, and your
@@ -83,7 +83,15 @@ the project's own `.nib` holds its preferences and, for now, its sessions:
   credentials or endpoints moved there from the project's old configuration. The
   key is the project folder's name plus a hash of its full path; session and
   subagent worktrees use their project's key.
+- `~/.nib/nib.db`: the sessions of every project (messages, plans, approvals, tool
+  calls and audit records) in one SQLite database, owner-only. nib bundles SQLite;
+  nothing needs to be installed. Each session is one row, with its messages and
+  events as rows of their own; a write that would overwrite a newer version of a
+  session is rejected.
 - `~/.nib/projects/<project-key>/`: the project's runtime state:
+  - `profiles/default/sessions/`: the locks and run leases of the project's sessions,
+    and beside it `checkpoints/`, `file_reads/` and `presence/`, each session's
+    checkpoints, read records and running-session heartbeats;
   - `profiles/default/memory.json`: durable environment and user memory;
   - `profiles/default/daemons/`: cron state, pins, and maintenance audit;
   - `profiles/default/managed-skills/` and `context.json`: curated skills and
@@ -101,17 +109,19 @@ the project's own `.nib` holds its preferences and, for now, its sessions:
 - `.nib/config.toml`: the project's preferences: provider and model selection,
   skills, and agent and runtime behavior. It cannot hold secrets or safety settings.
 - `.nib/skills/`: project-local skills.
-- `.nib/profiles/default/sessions/*.json`: messages, plans, approvals, tool calls,
-  and audit records, with each session's checkpoints, read records and presence
-  beside them. Sessions move to the user home in a later version.
 
 Configured profiles replace `default` with their profile ID. A profile with a custom
-`state_dir` keeps all its state, sessions included, in that folder.
+`state_dir` keeps all its state in that folder, its sessions as JSON files in its
+`sessions/` (as do the worktrees nib manages, which keep their state inside
+themselves).
+
+`nib doctor` prints these locations under "Checking nib layout".
 
 #### Runtime state from older versions
 
-Older versions kept the runtime state in the project's `.nib`. When this version
-loads a project that still has it, nib moves it to `~/.nib/projects/<project-key>/`:
+Older versions kept the runtime state and the sessions in the project's `.nib`.
+When this version loads a project that still has them, nib moves the state to
+`~/.nib/projects/<project-key>/` and the sessions into `~/.nib/nib.db`:
 
 - each file and folder is renamed, never copied, so nothing is rewritten and
   nothing is lost; where both places already hold the same file, the project's
@@ -125,6 +135,17 @@ loads a project that still has it, nib moves it to `~/.nib/projects/<project-key
   the project and nib says so;
 - the move is recorded in `~/.nib/projects/<project-key>/state.toml`, and an
   interrupted move finishes on the next start;
+- each session file (`.nib/profiles/<id>/sessions/<session-id>.json`) is imported
+  with its full content; nib checks every file before it changes anything, and a
+  session the database already holds differently stops the migration with a message
+  naming the file. Once every session of a profile is in the database, the whole
+  original `sessions/` folder (session files, locks, and any file nib could not read
+  as a session, which it names in a warning) is kept byte for byte in
+  `<project>/.nib/legacy-<time>/sessions/`. The import is recorded per session, so
+  an interrupted import resumes without duplicates, and running it again changes
+  nothing. A session that is running (its run lease is held) postpones the move;
+- sessions from before profiles (`.nib/sessions/`) are imported into the default
+  profile the same way; that folder itself is left in place;
 - worktrees older versions created under `.nib/worktrees/` stay where they are and
   remain manageable (`/land`, subagent cleanup, `nib doctor`); new ones go to the
   user home;
@@ -132,6 +153,30 @@ loads a project that still has it, nib moves it to `~/.nib/projects/<project-key
   with, so they cannot begin a second copy of the state in the project. State an
   older version writes there anyway is left in place and reported, never merged
   over the moved state.
+
+`nib doctor` lists what is left of older versions in `.nib`: runtime state that
+could not move yet, the `legacy-<time>` folders with the originals, and the older
+worktrees. Remove a `legacy-<time>` folder once you no longer need it. To go back
+to an older nib, restore the files from it; `~/.nib/nib.db` is kept.
+
+#### Moving or copying a project
+
+nib keys a project's state by its folder. A copied project starts with its own
+empty state and leaves the original's untouched. A moved or renamed project also
+starts fresh, and its earlier state stays under the old key; `nib doctor` reports
+it ("Moved? ... no longer exists") with the command that brings it along:
+
+```bash
+nib doctor --fix --relink /old/path/to/project
+```
+
+Naming the old folder confirms the re-link. nib refuses while the old state is in
+use, and when the old folder still exists (a copy keeps its own state). It moves the
+state folder and its sessions to the new key, keeps any state the new folder already
+had (and its sessions) aside in `~/.nib/projects/.relinked-<key>-<time>/`, keeps
+worktree receipts that name the old folder in the state's `relinked-<time>/`, and
+asks Git to repair the links of the worktrees nib manages. An interrupted re-link
+finishes on the next start or the next `--relink`.
 
 The repository `.gitignore` should exclude `.nib/`; API keys and session data must not
 be committed.
@@ -1283,7 +1328,7 @@ permissions.
   undo checkpoint keeps them. Files whose worktree was landed or removed are
   listed, not restored.
 - Checkpoints never touch `.git` or `.nib` and are not Git commits. They are
-  stored under `.nib/profiles/<id>/checkpoints/`, which the Linux sandbox hides
+  stored under `~/.nib/projects/<project-key>/profiles/<id>/checkpoints/`, which the Linux sandbox hides
   from tool commands. Commands allowed to run outside the sandbox (macOS,
   Windows, `full-access`) could change them, but a rewind still writes only
   inside the session's workspace.
@@ -1508,8 +1553,8 @@ Incident codes and default recovery actions are:
 
 Provider response bodies, remote messages, prompt echoes, credentials, continuations,
 and arbitrary metadata are intentionally omitted. The stable outcome and safe typed
-fields are available in the session's reconciliation event under
-`.nib/profiles/<profile>/sessions/<session-id>.json`; the rendered sentence is not
+fields are available in the session's reconciliation event, stored with the session
+in `~/.nib/nib.db`; the rendered sentence is not
 persisted. `nib doctor` shows the resolved local provider and transport without making
 a paid provider request. The interactive session remains available for another command
 after a safely reconciled failure; `nib run` exits nonzero.

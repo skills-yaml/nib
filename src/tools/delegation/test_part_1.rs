@@ -209,10 +209,7 @@ async fn partial_cleanup_failures_retain_intent_until_restart_reconciles_last() 
                 .expect("decode retained audit intent");
                 assert_eq!(intent.phase, SpawnPreparationPhase::AuditPublished);
                 assert!(
-                    intent
-                        .audit_sessions_dir
-                        .join(format!("{}.json", intent.audit_session_id))
-                        .is_file(),
+                    session_exists_in(&intent.audit_sessions_dir, &intent.audit_session_id),
                     "audit cleanup failure was retried by Drop instead of restart"
                 );
             }
@@ -289,10 +286,7 @@ async fn post_audit_cancellation_cleanup_failure_retains_intent_until_restart() 
     .expect("decode retained post-audit intent");
     assert_eq!(intent.phase, SpawnPreparationPhase::AuditPublished);
     assert!(
-        intent
-            .audit_sessions_dir
-            .join(format!("{}.json", intent.audit_session_id))
-            .is_file(),
+        session_exists_in(&intent.audit_sessions_dir, &intent.audit_session_id),
         "post-audit cleanup failure was retried by Drop instead of restart"
     );
 
@@ -460,9 +454,19 @@ async fn expired_spawn_preparation_retains_intent_until_fresh_restart_cleanup() 
     let _reconciliation_timeout = SpawnReconciliationTimeoutGuard::set(Duration::from_secs(15));
 
     for cancellable in [false, true] {
-        for phase in ["worktree_reservation", "session_temp", "session_canonical"] {
+        for phase in [
+            "worktree_reservation",
+            "session_temp",
+            "session_canonical",
+            "session_row",
+        ] {
             let root = tempfile::tempdir().expect("git project");
             initialize_spawn_test_repository(root.path());
+            if matches!(phase, "session_temp" | "session_canonical") {
+                // The file publication phases of a profile whose sessions
+                // stay files; `session_row` is the session database's.
+                use_file_sessions(root.path());
+            }
             ensure_records_directory(root.path()).expect("authorized records namespace");
             let primed_owner = SubagentOwnerLease::create(root.path()).expect("prime owner");
             primed_owner.remove().expect("remove primed owner");
@@ -522,6 +526,13 @@ async fn expired_spawn_preparation_retains_intent_until_fresh_restart_cleanup() 
                                 .any(|entry| entry.file_name().to_string_lossy().ends_with(".json"))
                         })
                         .unwrap_or(false),
+                    "session_row" => {
+                        crate::session::StoreDatabase::for_sessions_dir(&sessions_for_hook)
+                            .ok()
+                            .flatten()
+                            .and_then(|store| store.database.list(&store.scope).ok())
+                            .is_some_and(|rows| !rows.is_empty())
+                    }
                     _ => unreachable!(),
                 };
                 if boundary_reached
@@ -583,6 +594,14 @@ async fn expired_spawn_preparation_retains_intent_until_fresh_restart_cleanup() 
                 &after,
                 &format!("{phase} cancellable={cancellable} restart changed namespace entries"),
             );
+            if let Some(store) =
+                crate::session::StoreDatabase::for_sessions_dir(&sessions).expect("database")
+            {
+                assert!(
+                    store.database.list(&store.scope).expect("rows").is_empty(),
+                    "{phase} cancellable={cancellable} left a prepared audit row"
+                );
+            }
         }
     }
 }
@@ -767,7 +786,8 @@ async fn direct_spawn_rejects_missing_profile_parent_appearance_after_audit_pref
     let root = tempfile::tempdir().expect("project root");
     let mut config = crate::config::NibConfig::default();
     crate::config::save_nib_config_full(root.path(), &mut config).expect("default config");
-    let profiles = root.path().join(".nib/profiles");
+    // The default profile state lives in the project's user-home state.
+    let profiles = crate::paths::NibPaths::project_state(root.path()).join("profiles");
     assert!(!profiles.exists(), "fixture profile parent starts absent");
 
     let profiles_for_hook = profiles.clone();
@@ -775,7 +795,7 @@ async fn direct_spawn_rejects_missing_profile_parent_appearance_after_audit_pref
         assert!(slot
             .borrow_mut()
             .replace(Box::new(move || {
-                std::fs::create_dir(&profiles_for_hook).expect("appearing profile parent");
+                std::fs::create_dir_all(&profiles_for_hook).expect("appearing profile parent");
                 std::fs::write(profiles_for_hook.join("sentinel"), b"appeared")
                     .expect("appearing parent sentinel");
             }))
@@ -817,10 +837,10 @@ async fn direct_spawn_rejects_missing_profile_parent_appearance_after_audit_pref
     std::fs::remove_dir_all(&profiles).expect("remove appearing profile parent");
     prepare_subagent_audit_target(&json!({}), root.path(), "fresh-missing-parent-retry")
         .expect("fresh retry creates the preflighted profile hierarchy");
-    assert!(root
-        .path()
-        .join(".nib/profiles/default/sessions/fresh-missing-parent-retry.json")
-        .is_file());
+    assert!(default_session_exists(
+        root.path(),
+        "fresh-missing-parent-retry"
+    ));
 }
 
 #[test]
