@@ -416,7 +416,9 @@ async fn agents_policy_denies_before_creating_a_worktree() {
 
     assert!(!result.success);
     assert_eq!(result.approval_source.as_deref(), Some("policy"));
-    assert!(!root.path().join(".nib/worktrees").exists());
+    assert!(!nib::paths::NibPaths::project_state(&root.path())
+        .join("worktrees")
+        .exists());
     let session = store.load("policy-test").expect("audit session");
     assert_eq!(session.tool_calls.len(), 1);
     assert_eq!(
@@ -593,7 +595,9 @@ async fn invalid_unknown_or_weaker_agents_boundary_profiles_fail_before_approval
         assert_eq!(result.approval_source.as_deref(), Some("policy"));
         assert_eq!(approvals.load(Ordering::SeqCst), 0);
         assert!(!root.path().join("must-not-exist").exists());
-        assert!(!root.path().join(".nib/worktrees").exists());
+        assert!(!nib::paths::NibPaths::project_state(&root.path())
+            .join("worktrees")
+            .exists());
         let session = store.load(session_id).expect("denial audit");
         let record = session.tool_calls.last().expect("denied tool record");
         assert!(record.worktree_path.is_none());
@@ -649,7 +653,9 @@ async fn mutating_tools_require_an_approved_plan() {
         .error
         .unwrap()
         .contains("approved persisted session plan"));
-    assert!(!root.path().join(".nib/worktrees/sessions").exists());
+    assert!(!nib::paths::NibPaths::project_state(&root.path())
+        .join("worktrees/sessions")
+        .exists());
 
     let mut session = store.load("planned").expect("plan session");
     session.plan.as_mut().unwrap().approve();

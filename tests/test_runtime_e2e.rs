@@ -2175,7 +2175,7 @@ async fn repeated_mixed_question_batches_stop_without_executing_either_tool() {
     );
     assert!(persisted.tool_calls.is_empty());
     assert!(!root.path().join("mixed-side-effect.txt").exists());
-    let worktrees = root.path().join(".nib/worktrees");
+    let worktrees = nib::paths::NibPaths::project_state(&root.path()).join("worktrees");
     if worktrees.exists() {
         let sessions = worktrees.join("sessions");
         let entries = if sessions.exists() {
@@ -2231,7 +2231,7 @@ async fn mixed_skill_load_batches_stop_without_executing_either_tool() {
     );
     assert!(persisted.tool_calls.is_empty());
     assert!(!root.path().join("mixed-side-effect.txt").exists());
-    let worktrees = root.path().join(".nib/worktrees");
+    let worktrees = nib::paths::NibPaths::project_state(&root.path()).join("worktrees");
     if worktrees.exists() {
         let sessions = worktrees.join("sessions");
         let entries = if sessions.exists() {
@@ -3973,7 +3973,9 @@ Do not inspect the repository without an explicit decision.
     assert_eq!(summary.tool_call_count, 1);
     assert!(!summary.bound_reached);
     assert_eq!(*calls.lock().unwrap(), ["list_directory".to_string()]);
-    assert!(!root.path().join(".nib/worktrees").exists());
+    assert!(!nib::paths::NibPaths::project_state(&root.path())
+        .join("worktrees")
+        .exists());
 
     let persisted = store.load(&session.id).expect("denial audit");
     persisted

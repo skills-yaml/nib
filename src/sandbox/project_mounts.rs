@@ -225,6 +225,14 @@ impl<'a> MaskPlan<'a> {
             .map(crate::paths::NibPaths::project_dir)
             .filter(|state| std::fs::symlink_metadata(state).is_ok())
             .collect();
+        // The `.nib` of each bound root, which a working directory outside
+        // it (a managed worktree in nib's user home) has no ancestor for.
+        states.extend(
+            self.scan_roots
+                .iter()
+                .map(|root| crate::paths::NibPaths::project_dir(root))
+                .filter(|state| std::fs::symlink_metadata(state).is_ok()),
+        );
         // The user home holds credentials and the runtime state of every
         // project; a managed worktree inside it is bound again below.
         states.extend(user_home());
@@ -366,7 +374,7 @@ fn managed_worktree_project(worktree: &Path) -> Option<PathBuf> {
 
 /// nib's user home, canonical, when it exists.
 fn user_home() -> Option<PathBuf> {
-    crate::paths::NibPaths::user_home()?
+    crate::paths::NibPaths::state_home()?
         .canonicalize()
         .ok()
         .filter(|home| home.is_dir())

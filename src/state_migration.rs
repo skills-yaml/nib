@@ -154,7 +154,7 @@ pub(crate) fn ensure_state_parent(state: &Path) -> io::Result<PathBuf> {
 
 /// The user home, as `directory` spells it, when `directory` is inside it.
 pub(crate) fn user_home_containing(directory: &Path) -> Option<PathBuf> {
-    let home = NibPaths::user_home()?;
+    let home = NibPaths::state_home()?;
     let canonical = home.canonicalize().ok();
     [Some(home), canonical]
         .into_iter()

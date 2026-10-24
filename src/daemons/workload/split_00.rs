@@ -352,13 +352,29 @@ impl DurableTaskStore {
     }
 
     pub fn from_sessions_dir(sessions_dir: &Path) -> Result<Self, String> {
+        Self::at_daemon_dir(Self::profile_daemon_dir(sessions_dir)?)
+    }
+
+    /// The daemon directory of the profile that owns `sessions_dir`. Since
+    /// T082 a default profile keeps its state in nib's user home while its
+    /// sessions stay in the project, so the profile is resolved; sessions
+    /// outside a configured workspace keep their state beside them.
+    pub(crate) fn profile_daemon_dir(sessions_dir: &Path) -> Result<PathBuf, String> {
+        if let Ok(profile) = Self::resolve_profile(sessions_dir) {
+            return Ok(profile.daemon_dir().to_path_buf());
+        }
         let profile_state = sessions_dir
             .parent()
             .ok_or("session directory has no profile state parent")?;
-        Self::at_daemon_dir(profile_state.join("daemons"))
+        Ok(profile_state.join("daemons"))
     }
 
     pub fn resolve_profile_scope(sessions_dir: &Path) -> Result<(PathBuf, String), String> {
+        let profile = Self::resolve_profile(sessions_dir)?;
+        Ok((profile.root_path().to_path_buf(), profile.id().to_string()))
+    }
+
+    fn resolve_profile(sessions_dir: &Path) -> Result<crate::profile::Profile, String> {
         let sessions_dir = sessions_dir
             .canonicalize()
             .map_err(|error| format!("failed to resolve originating sessions: {error}"))?;
@@ -378,7 +394,7 @@ impl DurableTaskStore {
                     .canonicalize()
                     .is_ok_and(|path| path == sessions_dir)
                 {
-                    return Ok((profile.root_path().to_path_buf(), profile.id().to_string()));
+                    return Ok(profile.clone());
                 }
             }
         }

@@ -1554,11 +1554,9 @@ impl SubagentOwnerLease {
             .parent()
             .ok_or_else(|| "subagent owner lease anchor has no parent directory".to_string())?
             .to_path_buf();
-        let project_root = nib
-            .parent()
-            .ok_or_else(|| "subagent owner lease has no project root".to_string())?
-            .to_path_buf();
-        let lock_path = owner_lease_namespace_lock_path(&project_root);
+        // The anchor sits in the project's state directory, which may be in
+        // nib's user home rather than inside the project.
+        let lock_path = owner_lease_namespace_lock_path_in(&nib);
         match deadline {
             Some(deadline) => {
                 with_bounded_delegation_lock_in_until(&lock_path, &nib, deadline, |_, deadline| {
@@ -1994,5 +1992,10 @@ pub(crate) fn owner_lease_directory(project_root: &Path) -> PathBuf {
 }
 
 pub(crate) fn owner_lease_namespace_lock_path(project_root: &Path) -> PathBuf {
-    crate::paths::NibPaths::project_state(project_root).join(".nib-subagent-owner-namespace.lock")
+    owner_lease_namespace_lock_path_in(&crate::paths::NibPaths::project_state(project_root))
+}
+
+/// The owner lease namespace lock of the state directory `state`.
+pub(crate) fn owner_lease_namespace_lock_path_in(state: &Path) -> PathBuf {
+    state.join(".nib-subagent-owner-namespace.lock")
 }

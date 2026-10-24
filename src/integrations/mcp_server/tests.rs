@@ -143,11 +143,8 @@ impl ManagedProcessFixture {
 
         // The production supervisor owns this transition. The fixture
         // publishes the same CAS state only after reaping its controlled child.
-        let directory_path = self
-            .store
-            .project_root()
-            .join(".nib")
-            .join("process-scopes");
+        let directory_path =
+            crate::paths::NibPaths::project_state(self.store.project_root()).join("process-scopes");
         let directory = crate::daemons::state::StableDirectory::open(&directory_path)
             .expect("open managed-process fixture directory");
         let scope_path = directory_path.join(format!("{}.json", complete.scope_id));

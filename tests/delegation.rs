@@ -98,8 +98,10 @@ async fn legacy_running_subagent_cancellation_is_explicitly_unresolved() {
             .is_cancelled(),
         "legacy task cancellation must join as aborted"
     );
-    let persisted = std::fs::read_to_string(root.path().join(".nib/subagents/sub-cancel.json"))
-        .expect("persisted legacy record");
+    let persisted = std::fs::read_to_string(
+        nib::paths::NibPaths::project_state(&root.path()).join("subagents/sub-cancel.json"),
+    )
+    .expect("persisted legacy record");
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&persisted).unwrap()["status"],
         "running"
@@ -192,7 +194,8 @@ fn subagent_records_are_bounded_and_atomically_serialized() {
     );
     get_subagent_record(root.path(), "shared").expect("final record is valid JSON");
 
-    let oversized = root.path().join(".nib/subagents/oversized.json");
+    let oversized =
+        nib::paths::NibPaths::project_state(&root.path()).join("subagents/oversized.json");
     std::fs::File::create(&oversized)
         .and_then(|file| file.set_len(16 * 1024 * 1024 + 1))
         .expect("oversized sparse record");
@@ -208,7 +211,7 @@ fn subagent_listing_rejects_symlinked_records() {
 
     let root = tempdir().expect("root");
     let outside = tempdir().expect("outside");
-    let record_dir = root.path().join(".nib/subagents");
+    let record_dir = nib::paths::NibPaths::project_state(&root.path()).join("subagents");
     write_subagent_record(
         root.path(),
         &SubagentRecord {
@@ -434,7 +437,8 @@ fn assert_public_subagent_start(response: &serde_json::Value) {
 fn assert_internal_start_authority(root: &Path, subagent_id: &str) {
     let record: serde_json::Value = serde_json::from_slice(
         &std::fs::read(
-            root.join(".nib/subagents")
+            nib::paths::NibPaths::project_state(&root)
+                .join("subagents")
                 .join(format!("{subagent_id}.json")),
         )
         .expect("persisted subagent record"),
@@ -666,8 +670,8 @@ fn dropping_the_runtime_cannot_leave_a_spawned_record_running() {
         .is_none());
     let persisted: nib::tools::delegation::SubagentRecord = serde_json::from_slice(
         &std::fs::read(
-            root.path()
-                .join(".nib/subagents")
+            nib::paths::NibPaths::project_state(&root.path())
+                .join("subagents")
                 .join(format!("{id}.json")),
         )
         .expect("persisted internal record"),
@@ -1121,8 +1125,12 @@ async fn a_worktree_session_cannot_start_a_subagent_from_its_worktree() {
         assert!(error.contains("/land"), "{tool}: {error}");
     }
     for created in [&session_worktree, root.path()] {
-        assert!(!created.join(".nib/worktrees/subagents").exists());
-        assert!(!created.join(".nib/subagents").exists());
+        assert!(!nib::paths::NibPaths::project_state(&created)
+            .join("worktrees/subagents")
+            .exists());
+        assert!(!nib::paths::NibPaths::project_state(&created)
+            .join("subagents")
+            .exists());
     }
 
     // A session that chose a worktree but has not created it yet is refused
@@ -1150,7 +1158,9 @@ async fn a_worktree_session_cannot_start_a_subagent_from_its_worktree() {
         .await;
     assert!(!spawned.success);
     assert!(spawned.error.unwrap_or_default().contains("/land"));
-    assert!(!root.path().join(".nib/worktrees/subagents").exists());
+    assert!(!nib::paths::NibPaths::project_state(&root.path())
+        .join("worktrees/subagents")
+        .exists());
 }
 
 #[tokio::test]
@@ -1632,7 +1642,8 @@ async fn merges_for_different_subagent_ids_share_one_repository_lock() {
     std::fs::write(second_worktree.path.join("lock-b.txt"), "second\n").expect("second result");
     completed_record(root.path(), "sub-lock-a", &first_worktree);
     completed_record(root.path(), "sub-lock-b", &second_worktree);
-    let merge_lock_path = root.path().join(".nib/subagents/.merge.lock");
+    let merge_lock_path =
+        nib::paths::NibPaths::project_state(&root.path()).join("subagents/.merge.lock");
     let merge_lock = OpenOptions::new()
         .read(true)
         .write(true)
@@ -1699,10 +1710,12 @@ async fn cancelled_repository_lock_wait_is_prompt_and_preserves_record() {
         Worktree::create(root.path(), "sub-lock-cancel").expect("cancelled lock worktree");
     std::fs::write(worktree.path.join("cancelled.txt"), "child\n").expect("child result");
     completed_record(root.path(), "sub-lock-cancel", &worktree);
-    let record_path = root.path().join(".nib/subagents/sub-lock-cancel.json");
+    let record_path =
+        nib::paths::NibPaths::project_state(&root.path()).join("subagents/sub-lock-cancel.json");
     let record_before = std::fs::read(&record_path).expect("record before cancellation");
 
-    let merge_lock_path = root.path().join(".nib/subagents/.merge.lock");
+    let merge_lock_path =
+        nib::paths::NibPaths::project_state(&root.path()).join("subagents/.merge.lock");
     let merge_lock = OpenOptions::new()
         .read(true)
         .write(true)

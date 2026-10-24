@@ -1170,10 +1170,7 @@ async fn schedule(args: &Value, _cwd: &Path) -> Result<Value, String> {
     {
         return Err(format!("originating session not found: {session_id}"));
     }
-    let audit_path = sessions_dir
-        .parent()
-        .ok_or("originating session directory has no profile state parent")?
-        .join("daemons")
+    let audit_path = crate::daemons::workload::DurableTaskStore::profile_daemon_dir(&sessions_dir)?
         .join("audit.jsonl");
     let audit_log = crate::daemons::task::DaemonAuditLog::at_path(audit_path);
     let (project_root, profile_id) =

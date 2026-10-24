@@ -119,6 +119,21 @@ impl NibPaths {
         }
     }
 
+    /// The user home that holds runtime state: [`Self::user_home`]. Unit
+    /// tests keep runtime state in the process-wide test home on every
+    /// thread, because the work of one test runs on several threads; a
+    /// `TestNibHome` isolates the user configuration and settings only.
+    pub fn state_home() -> Option<PathBuf> {
+        #[cfg(test)]
+        {
+            Some(test_home::process_home().to_path_buf())
+        }
+        #[cfg(not(test))]
+        {
+            Self::user_home()
+        }
+    }
+
     /// The user configuration file, `<user home>/config.toml`.
     pub fn user_config_file() -> Option<PathBuf> {
         Self::user_home().map(|home| home.join(USER_CONFIG_FILE))
@@ -157,7 +172,7 @@ impl NibPaths {
     /// approvals, the sandbox level and trust.
     pub fn user_project_dir(project_root: &Path) -> Option<PathBuf> {
         let key = Self::project_key(project_root)?;
-        Some(Self::user_projects_dir()?.join(key))
+        Some(projects_dir(Self::user_home()?).join(key))
     }
 
     /// The user-home directory of a folder's runtime state,
@@ -165,14 +180,7 @@ impl NibPaths {
     /// same directory as [`Self::user_project_dir`].
     pub fn user_state_dir(project_root: &Path) -> Option<PathBuf> {
         let key = Self::state_key(project_root)?;
-        Some(Self::user_projects_dir()?.join(key))
-    }
-
-    /// `<user home>/projects`, through the canonical user home when it
-    /// exists, so the paths below it compare equal to canonical paths.
-    fn user_projects_dir() -> Option<PathBuf> {
-        let home = Self::user_home()?;
-        Some(home.canonicalize().unwrap_or(home).join(USER_PROJECTS_DIR))
+        Some(projects_dir(Self::state_home()?).join(key))
     }
 
     /// The directory that holds a project's runtime state.
@@ -333,7 +341,7 @@ impl NibPaths {
         }
         let in_project = state.file_name()? == PROJECT_DIR_NAME;
         let in_user_home =
-            Self::user_projects_dir().is_some_and(|projects| state.parent() == Some(&projects));
+            Self::state_home().is_some_and(|home| state.parent() == Some(&projects_dir(home)));
         (in_project || in_user_home).then(|| state.to_path_buf())
     }
 
@@ -381,6 +389,12 @@ impl NibPaths {
     pub fn is_project_dir_name_ignore_case(name: &str) -> bool {
         name.eq_ignore_ascii_case(PROJECT_DIR_NAME)
     }
+}
+
+/// `<home>/projects`, through the canonical home when it exists, so the
+/// paths below it compare equal to canonical paths.
+fn projects_dir(home: PathBuf) -> PathBuf {
+    home.canonicalize().unwrap_or(home).join(USER_PROJECTS_DIR)
 }
 
 /// A key: the folder name of `root`, reduced to portable characters, and a

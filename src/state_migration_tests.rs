@@ -395,7 +395,7 @@ fn older_versions_find_a_state_moved_marker_and_stop() {
 
 #[test]
 fn a_fresh_project_records_its_state_in_the_user_home() {
-    let home = TestNibHome::isolated();
+    let _home = TestNibHome::isolated();
     let directory = tempfile::tempdir().expect("project");
     let root = directory.path().canonicalize().unwrap();
 
@@ -405,7 +405,8 @@ fn a_fresh_project_records_its_state_in_the_user_home() {
     );
 
     let state = NibPaths::user_state_dir(&root).unwrap();
-    assert!(state.starts_with(home.directory.path().canonicalize().unwrap()));
+    let home = NibPaths::state_home().unwrap().canonicalize().unwrap();
+    assert!(state.starts_with(&home));
     assert_eq!(NibPaths::project_state(&root), state);
     assert!(state.join(STATE_RECORD_FILE).is_file());
     assert!(state.join(PROJECT_IDENTITY_FILE).is_file());
@@ -428,7 +429,7 @@ fn a_fresh_project_records_its_state_in_the_user_home() {
 
 #[test]
 fn managed_worktrees_keep_their_state_inside_themselves() {
-    let home = TestNibHome::isolated();
+    let _home = TestNibHome::isolated();
     let project = tempfile::tempdir().expect("project");
     let root = project.path().canonicalize().unwrap();
     let state = NibPaths::user_state_dir(&root).unwrap();
@@ -456,7 +457,7 @@ fn managed_worktrees_keep_their_state_inside_themselves() {
         );
     }
     assert!(NibPaths::subagent_worktrees(&root)
-        .starts_with(home.directory.path().canonicalize().unwrap()));
+        .starts_with(NibPaths::state_home().unwrap().canonicalize().unwrap()));
     assert_eq!(
         NibPaths::subagent_worktree_roots(&root),
         vec![
@@ -499,4 +500,46 @@ fn a_symbolic_link_for_the_project_directory_is_neither_used_nor_moved() {
     );
 
     assert_eq!(files_below(&other.legacy()), before);
+}
+
+#[test]
+fn loading_profiles_moves_the_state_and_resolves_the_moved_profile() {
+    let _home = TestNibHome::isolated();
+    let project = LegacyProject::new();
+
+    let registry = crate::profile::ProfileRegistry::load(
+        &project.root,
+        &crate::config::ProfilesConfig::default(),
+    )
+    .expect("profiles");
+
+    let profile = registry.default_profile();
+    assert_eq!(
+        profile.state_dir(),
+        project.state().join("profiles/default")
+    );
+    assert_eq!(
+        profile.memory_store().user("style").as_deref(),
+        Some("terse")
+    );
+    // Sessions stay in the project until they move to SQLite.
+    assert_eq!(
+        profile.sessions_dir(),
+        project.legacy().join("profiles/default/sessions")
+    );
+    assert!(profile.sessions_dir().join("s-1.json").is_file());
+    profile.ensure_state_dirs().expect("state directories");
+    assert!(project.state().join("subagents/sub-1.json").is_file());
+    assert!(is_moved_marker(
+        &project
+            .legacy()
+            .join("profiles/default/.legacy-state-migration-v1.json")
+    ));
+    // Loading again finds nothing left to move.
+    let again = crate::profile::ProfileRegistry::load(
+        &project.root,
+        &crate::config::ProfilesConfig::default(),
+    )
+    .expect("profiles again");
+    assert_eq!(again.default_profile(), profile);
 }

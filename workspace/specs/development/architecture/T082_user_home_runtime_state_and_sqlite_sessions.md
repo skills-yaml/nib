@@ -385,8 +385,19 @@ because this touches data integrity, credentials and a public layout.
     older version writes anyway are left in place and reported, never
     merged over the moved state.
   - a symbolic link among the legacy entries stops the migration.
+- Lock anchors of user-home state follow the general rule (the parent of
+  the locked directory, here `~/.nib/projects/`); the `.nib`-named special
+  case of `daemons/state/split_01.rs` now applies only to legacy in-project
+  and in-worktree state. Directory capabilities that were opened from the
+  project root (process scopes, records, owner leases, merge locks,
+  delegation locks, subagent worktree parents) are opened from the state
+  directory's parent.
 - New user-home directories are `0700` and records `0600`
   (`ensure_state_directory`, `ensure_state_parent`).
+- Unit tests: the process-wide test home is passed to child processes the
+  tests spawn from the test binary (`NIB_UNIT_TEST_PROCESS_HOME`), so they
+  share the parent's state; tests that built legacy state paths by hand now
+  resolve them through `NibPaths`.
 - Validation: `cargo fmt`, `task check`; focused tests below.
 
 ## Version Impact

@@ -1311,12 +1311,9 @@ mod tests {
 
         let repository = repository();
         let outside = tempdir().expect("outside");
-        std::fs::create_dir(repository.path().join(".nib")).expect("state");
-        symlink(
-            outside.path(),
-            crate::paths::NibPaths::project_state(&repository.path()).join("worktrees"),
-        )
-        .expect("worktrees symlink");
+        let state = crate::paths::NibPaths::project_state(repository.path());
+        std::fs::create_dir_all(&state).expect("state");
+        symlink(outside.path(), state.join("worktrees")).expect("worktrees symlink");
         let mut manager = WorktreeManager::new(repository.path().to_path_buf());
 
         let error = manager

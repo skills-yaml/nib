@@ -338,7 +338,10 @@ async fn invalid_tool_calls_never_create_audit_sessions() {
     }
 
     assert!(
-        !root.path().join(".nib").exists(),
+        !root.path().join(".nib").exists()
+            && !crate::paths::NibPaths::project_state(root.path())
+                .join("profiles")
+                .exists(),
         "invalid calls must not initialize profile state or persist sessions"
     );
 }

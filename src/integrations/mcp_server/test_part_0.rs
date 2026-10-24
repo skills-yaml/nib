@@ -878,9 +878,7 @@ async fn subagent_shutdown_joins_held_lock_reconciliation_before_returning() {
     drop(held);
     tokio::time::sleep(crate::tools::delegation::SUBAGENT_CANCELLATION_RECONCILIATION_TIMEOUT * 2)
         .await;
-    let record_path = root
-        .path()
-        .join(".nib")
+    let record_path = crate::paths::NibPaths::project_state(root.path())
         .join("subagents")
         .join(format!("{id}.json"));
     let persisted: crate::tools::delegation::SubagentRecord = serde_json::from_slice(
@@ -1164,7 +1162,10 @@ async fn status_rejects_credential_derived_identifiers_before_audit_or_reflectio
     }
 
     assert!(
-        !root.path().join(".nib").exists(),
+        !root.path().join(".nib").exists()
+            && !crate::paths::NibPaths::project_state(root.path())
+                .join("profiles")
+                .exists(),
         "rejected status calls must not initialize profile state or create audit sessions"
     );
 }
@@ -1220,7 +1221,10 @@ async fn schema_validation_errors_never_reflect_environment_credentials() {
     }
 
     assert!(
-        !root.path().join(".nib").exists(),
+        !root.path().join(".nib").exists()
+            && !crate::paths::NibPaths::project_state(root.path())
+                .join("profiles")
+                .exists(),
         "schema rejection must precede audit-session initialization"
     );
 }

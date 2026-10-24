@@ -542,8 +542,7 @@ pub(crate) fn write_subagent_record_unlocked_with_receipt_and_guard(
     let parent = path
         .parent()
         .ok_or_else(|| "subagent record has no parent".to_string())?;
-    crate::fs_security::ensure_directory_without_symlinks(parent)
-        .map_err(|error| error.to_string())?;
+    crate::state_migration::ensure_state_directory(parent).map_err(|error| error.to_string())?;
     let metadata = std::fs::symlink_metadata(parent).map_err(|error| error.to_string())?;
     let canonical_parent = parent
         .canonicalize()

@@ -228,7 +228,29 @@ pub(crate) fn subagent_namespace_snapshot(path: &Path) -> Vec<(PathBuf, Vec<u8>)
 
     let mut snapshot = Vec::new();
     visit(path, path, &mut snapshot);
+    snapshot.extend(for_project_state(path, |state| {
+        let mut state_snapshot = Vec::new();
+        visit(state, state, &mut state_snapshot);
+        state_snapshot
+    }));
     snapshot
+}
+
+/// The entries of a project's state directory, under a `<project state>`
+/// prefix, when the state lives outside `path` (in nib's user home), so a
+/// snapshot of a project still covers its runtime state (T082).
+fn for_project_state(
+    path: &Path,
+    visit: impl FnOnce(&Path) -> Vec<(PathBuf, Vec<u8>)>,
+) -> Vec<(PathBuf, Vec<u8>)> {
+    let state = crate::paths::NibPaths::project_state(path);
+    if state.starts_with(path) || !state.is_dir() {
+        return Vec::new();
+    }
+    visit(&state)
+        .into_iter()
+        .map(|(relative, bytes)| (Path::new("<project state>").join(relative), bytes))
+        .collect()
 }
 
 pub(crate) fn assert_spawn_cleanup_snapshot(
@@ -249,7 +271,11 @@ pub(crate) fn assert_spawn_cleanup_snapshot(
         .chain(after_map.keys())
         .filter(|path| before_map.get(*path) != after_map.get(*path))
         .filter(|path| {
-            let rendered = path.to_string_lossy().replace('\\', "/");
+            // The project's state is under `.nib`, or in nib's user home.
+            let rendered =
+                path.to_string_lossy()
+                    .replace('\\', "/")
+                    .replacen("<project state>/", ".nib/", 1);
             let complete_worktree_proof = rendered.starts_with(".nib/worktree-ownership/")
                 && rendered.ends_with(".json")
                 && !before_map.contains_key(*path)
@@ -402,6 +428,11 @@ pub(crate) fn directory_tree_snapshot(path: &Path) -> Vec<(PathBuf, Vec<u8>)> {
 
     let mut snapshot = Vec::new();
     visit(path, path, &mut snapshot);
+    snapshot.extend(for_project_state(path, |state| {
+        let mut state_snapshot = Vec::new();
+        visit(state, state, &mut state_snapshot);
+        state_snapshot
+    }));
     snapshot
 }
 

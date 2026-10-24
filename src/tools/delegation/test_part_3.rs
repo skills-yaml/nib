@@ -362,17 +362,17 @@ fn record_bridge_rejects_whole_records_replacement_before_sensitive_mutation() {
     let records = ensure_records_directory(root.path()).expect("records");
     let original_sentinel = records.join("original.sentinel");
     std::fs::write(&original_sentinel, b"original records").expect("original records sentinel");
-    let process_state = root.path().join(".nib").join("process-scopes");
-    let audit_state = root.path().join(".nib").join("sessions");
-    std::fs::create_dir(&process_state).expect("process state directory");
-    std::fs::create_dir(&audit_state).expect("audit state directory");
+    let process_state = crate::paths::NibPaths::project_state(root.path()).join("process-scopes");
+    let audit_state = crate::paths::NibPaths::project_state(root.path()).join("sessions");
+    std::fs::create_dir_all(&process_state).expect("process state directory");
+    std::fs::create_dir_all(&audit_state).expect("audit state directory");
     std::fs::write(process_state.join("scope.sentinel"), b"process state")
         .expect("process sentinel");
     std::fs::write(audit_state.join("audit.sentinel"), b"audit state").expect("audit sentinel");
     let original_before = directory_tree_snapshot(&records);
     let process_before = directory_tree_snapshot(&process_state);
     let audit_before = directory_tree_snapshot(&audit_state);
-    let displaced = root.path().join(".nib").join("subagents.displaced");
+    let displaced = crate::paths::NibPaths::project_state(root.path()).join("subagents.displaced");
     let record = record_fixture(root.path(), "records-capability-replacement", "running");
     let path = record_path(root.path(), &record.id).expect("record path");
     let mut replacement_before = None;
@@ -514,7 +514,7 @@ fn expired_absolute_delegation_lock_rejects_free_lock_before_operation() {
 #[test]
 fn records_initialization_deadline_guards_nib_creation_and_retries_safely() {
     let root = tempfile::tempdir().expect("root");
-    let nib = root.path().join(".nib");
+    let nib = crate::paths::NibPaths::project_state(root.path());
     let deadline = Instant::now() + expiry_checkpoint_timeout();
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
     let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(1);
@@ -749,7 +749,7 @@ fn owner_creation_stops_before_anchor_publication_when_its_deadline_expires() {
     let boundary_wait = Duration::from_secs(10);
     let root = tempfile::tempdir().expect("root");
     let owner_directory = owner_lease_directory(root.path());
-    let anchor_directory = root.path().join(".nib");
+    let anchor_directory = crate::paths::NibPaths::project_state(root.path());
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
     let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(1);
     let project_root = root.path().to_path_buf();
@@ -1194,7 +1194,7 @@ fn record_and_owner_namespace_locks_have_absolute_deadlines() {
     let started = Instant::now();
     let error = with_bounded_delegation_lock_in(
         &owner_lock,
-        &root.path().join(".nib"),
+        &crate::paths::NibPaths::project_state(root.path()),
         Duration::from_millis(75),
         |_, _| -> Result<(), String> { panic!("held owner namespace must not run its operation") },
     )

@@ -880,12 +880,9 @@ fn create_rejects_symlinked_worktree_ancestor_without_outside_mutation() {
 
     let repository = repository();
     let outside = tempdir().expect("outside");
-    std::fs::create_dir(repository.path().join(".nib")).expect("state");
-    symlink(
-        outside.path(),
-        crate::paths::NibPaths::project_state(&repository.path()).join("worktrees"),
-    )
-    .expect("worktrees symlink");
+    let state = crate::paths::NibPaths::project_state(repository.path());
+    std::fs::create_dir_all(&state).expect("state");
+    symlink(outside.path(), state.join("worktrees")).expect("worktrees symlink");
 
     let error = Worktree::create(repository.path(), "hostile")
         .expect_err("symlinked worktree root must fail closed");

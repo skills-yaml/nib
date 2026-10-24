@@ -33,9 +33,15 @@ async fn production_delegation_rejects_macos_before_creating_state() {
     )
     .expect_err("macOS production delegation must fail closed");
     assert!(error.contains("unavailable on macOS"), "{error}");
-    assert!(!root.path().join(".nib/worktrees").exists());
-    assert!(!root.path().join(".nib/subagents").exists());
-    assert!(!root.path().join(".nib/process-scopes").exists());
+    assert!(!nib::paths::NibPaths::project_state(&root.path())
+        .join("worktrees")
+        .exists());
+    assert!(!nib::paths::NibPaths::project_state(&root.path())
+        .join("subagents")
+        .exists());
+    assert!(!nib::paths::NibPaths::project_state(&root.path())
+        .join("process-scopes")
+        .exists());
 }
 
 #[test]

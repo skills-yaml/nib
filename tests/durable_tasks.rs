@@ -311,9 +311,10 @@ fn detached_terminal_redacts_profile_and_config_secrets_before_persistence() {
     let raw_session = std::fs::read_to_string(session_path).expect("session JSON");
     assert!(!raw_session.contains(secret));
     assert!(!raw_session.contains(config_secret));
-    let raw_task = std::fs::read_to_string(root.path().join(format!(
-        ".nib/profiles/default/daemons/tasks/{task_id}.json"
-    )))
+    let raw_task = std::fs::read_to_string(
+        nib::paths::NibPaths::profile_state(root.path(), "default")
+            .join(format!("daemons/tasks/{task_id}.json")),
+    )
     .expect("task JSON");
     assert!(!raw_task.contains(secret));
     assert!(!raw_task.contains(config_secret));

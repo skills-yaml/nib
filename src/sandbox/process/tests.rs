@@ -40,7 +40,8 @@ pub(crate) fn process_namespace_snapshot(path: &Path) -> Vec<(OsString, Vec<u8>)
 
 pub(crate) fn git_project() -> tempfile::TempDir {
     let root = tempfile::tempdir().expect("temp project");
-    std::fs::create_dir(root.path().join(".nib")).expect("state root");
+    std::fs::create_dir_all(crate::paths::NibPaths::project_state(root.path()))
+        .expect("state root");
     root
 }
 
