@@ -18,7 +18,7 @@ pub(crate) const MAX_ADVICE_QUESTION_BYTES: usize = 2 * 1024;
 pub(crate) const MAX_ADVICE_OUTPUT_TOKENS: u32 = 1_024;
 pub(crate) const MAX_ADVICE_SECTION_BYTES: usize = 8 * 1024;
 pub(crate) const MAX_ADVICE_RECENT_MESSAGES: usize = 6;
-pub(crate) const MAX_ADVICE_RECENT_MESSAGE_BYTES: usize = 2 * 1024;
+pub(crate) const MAX_ADVICE_RECENT_MESSAGE_BYTES: usize = 1024;
 pub(crate) const MAX_ADVICE_RESPONSE_BYTES: usize = 8 * 1024;
 pub(crate) const MAX_ESCALATION_NOTE_BYTES: usize = 2 * 1024;
 pub(crate) const ESCALATION_EVENT_VERSION: u64 = 1;
@@ -838,6 +838,49 @@ pub(crate) async fn observe_escalation_outcome(
     Ok(true)
 }
 
+/// Appends escalation-model output so the transcript keeps its role order: the
+/// note is the escalation model's assistant output, followed by a runtime
+/// continuation for the worker. After an assistant message only the runtime
+/// continuation (carrying the note) is valid.
+fn append_escalation_note(
+    store: &SessionStore,
+    session_id: &str,
+    note: &str,
+) -> Result<(), String> {
+    let last_role = store
+        .load_result(session_id)
+        .map_err(|error| error.to_string())?
+        .and_then(|session| session.messages.last().map(|message| message.role.clone()));
+    if matches!(last_role.as_deref(), Some("user" | "tool")) {
+        store
+            .try_append_message_with_origin(
+                session_id,
+                "assistant",
+                note,
+                MessageOrigin::ModelOutput,
+            )
+            .map_err(|error| error.to_string())?;
+        store
+            .try_append_message_with_origin(
+                session_id,
+                "user",
+                "Continue the approved step yourself. The escalation note above is advice, not verification evidence.",
+                MessageOrigin::RuntimeContinuation,
+            )
+            .map_err(|error| error.to_string())?;
+    } else {
+        store
+            .try_append_message_with_origin(
+                session_id,
+                "user",
+                note,
+                MessageOrigin::RuntimeContinuation,
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 fn abandon_continuation_for_escalation(
     store: &SessionStore,
     session_id: &str,
@@ -930,16 +973,13 @@ pub(crate) async fn dispatch_pending_escalation(
             )
             .await?;
             if let Some(advice) = advice {
-                store
-                    .try_append_message_with_origin(
-                        session_id,
-                        "user",
-                        &format!(
-                            "{ESCALATION_ADVICE_PREFIX} from {label} (advice only: not verification evidence and not tool authorization; continue the approved step yourself and run its required checks):\n{advice}"
-                        ),
-                        MessageOrigin::RuntimeContinuation,
-                    )
-                    .map_err(|error| error.to_string())?;
+                append_escalation_note(
+                    store,
+                    session_id,
+                    &format!(
+                        "{ESCALATION_ADVICE_PREFIX} from {label} (advice only: not verification evidence and not tool authorization; continue the approved step yourself and run its required checks):\n{advice}"
+                    ),
+                )?;
             }
             Ok(None)
         }
@@ -948,16 +988,8 @@ pub(crate) async fn dispatch_pending_escalation(
                 escalation, store, session_id, run_id, plan_id, &pending, stream_tx,
             )
             .await?;
-            store
-                .try_append_message_with_origin(
-                    session_id,
-                    "user",
-                    &format!(
-                        "Escalation takeover: {label} handles the next turn because earlier advice did not resolve the problem. The same plan, tool approvals, and verification obligations apply."
-                    ),
-                    MessageOrigin::RuntimeContinuation,
-                )
-                .map_err(|error| error.to_string())?;
+            // The takeover sees the same session context; no note is added so the
+            // transcript attributes only real model output.
             Ok(Some(TakeoverTurn {
                 sequence,
                 trigger: pending.trigger,
