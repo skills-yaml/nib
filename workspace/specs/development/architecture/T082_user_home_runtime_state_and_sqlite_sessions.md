@@ -160,7 +160,7 @@ cron, task), `src/tools/delegation/`, `src/tools/core.rs`,
 `src/agent/loop/verify.rs`, `Cargo.toml` (rusqlite), user guide, tech docs
 (with approval), catalog, releases and memory.
 
-## Phased Delivery
+## Phased Delivery (Implementation Plan)
 
 1. Add `NibPaths` and migrate all path sites with no layout change (pure
    refactor; the existing tests guard it).
