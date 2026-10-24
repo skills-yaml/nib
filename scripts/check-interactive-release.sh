@@ -188,12 +188,15 @@ offline_environment=(
 session_directory="$fixture/sessions"
 mkdir -p "$session_directory"
 export_sessions() {
-  python3 -I - "$nib_home/nib.db" "$session_directory" <<'EXPORT'
-import json, os, sqlite3, sys
+  # A failed export must say so, rather than surface later as a wait timeout.
+  python3 -I - "$nib_home/nib.db" "$session_directory" <<'EXPORT' || {
+import json, os, pathlib, sqlite3, sys
 database, target = sys.argv[1], sys.argv[2]
 if not os.path.isfile(database):
     sys.exit(0)
-connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=30)
+connection = sqlite3.connect(
+    pathlib.Path(database).resolve().as_uri() + "?mode=ro", uri=True, timeout=30
+)
 try:
     with connection:
         sessions = connection.execute(
@@ -217,6 +220,9 @@ try:
 finally:
     connection.close()
 EXPORT
+    printf '%s\n' 'session export from nib.db failed' >&2
+    exit 1
+  }
 }
 
 session_count() {

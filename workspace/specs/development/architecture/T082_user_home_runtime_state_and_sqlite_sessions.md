@@ -725,6 +725,26 @@ fixed; one part of a minor finding is recorded as a deviation.
   development host (no `pwsh`); its embedded exporter was run there
   against a real `nib.db`. Its first execution is the Windows CI smoke.
 
+Independent review of the gate fixes (`0d879ab..24e8c8c`): APPROVE, no
+blocking or major findings. Resolutions:
+- Fixed in the smoke scripts: the bash export builds its read-only SQLite URI
+  with `as_uri()`, so special characters in the temp path cannot break it; a
+  failed bash export now reports "session export from nib.db failed" instead of
+  surfacing as a wait timeout; the Windows background exporter records its last
+  error and the stop step prints it, with any non-zero exit code.
+- Recorded, no code change: an idle pre-T082 process holds no run lease and
+  publishes no presence, so migration can move its state; it then writes to a
+  recreated legacy directory, which the next migration leaves in place and
+  reports. No data is lost, but the user's sessions are split until they are
+  reconciled; the release notes must say to stop older nib processes first.
+- Recorded follow-up: a current process that opened a legacy-resolved store
+  while migration was deferred and publishes no presence (`nib mcp-server`, the
+  daemons) gets a fail-closed "state directory changed" error on its next write
+  once another process migrates. It is safe, but the process should re-resolve
+  its store on that error, or publish presence.
+- No change needed: exported smoke session files are never pruned, which can
+  only cause false failures, not vacuous passes.
+
 ## Version Impact
 
 | Component | Impact | Release | Rationale |

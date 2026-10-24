@@ -56,14 +56,20 @@ if stop is None:
     export()
     sys.exit(0)
 deadline = time.monotonic() + 300
+last_error = None
 while not os.path.exists(stop) and time.monotonic() < deadline:
     try:
         export()
-    except (OSError, sqlite3.Error, ValueError):
+        last_error = None
+    except Exception as error:
         # nib may hold a write lock, or an observer may hold an exported file
-        # open; the next round retries under the observer's own deadline.
-        pass
+        # open; the next round retries under the observer's own deadline. The
+        # last failure is kept so a timeout can name its cause.
+        last_error = repr(error)
     time.sleep(0.1)
+if last_error is not None:
+    with open(f"{stop}.log", "w", encoding="utf-8") as log:
+        log.write(last_error)
 '@
 
 function Find-NibSmokePython {
@@ -115,6 +121,13 @@ function Stop-NibSmokeSessionExporter {
         if (-not $script:sessionExporter.WaitForExit(5000)) {
             $script:sessionExporter.Kill($true)
             $script:sessionExporter.WaitForExit(5000) | Out-Null
+        } elseif ($script:sessionExporter.ExitCode -ne 0) {
+            Write-Warning "session exporter exited with code $($script:sessionExporter.ExitCode)"
+        }
+        # A failing exporter surfaces its last error instead of a bare timeout.
+        $exportLog = "$($script:sessionExportStop).log"
+        if (Test-Path -LiteralPath $exportLog) {
+            Write-Warning ("session exporter last failed: " + (Get-Content -LiteralPath $exportLog -Raw))
         }
     } finally {
         $script:sessionExporter.Dispose()
