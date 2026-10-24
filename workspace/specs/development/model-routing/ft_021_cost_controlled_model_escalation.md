@@ -198,7 +198,7 @@ complexity. Repeated cheap sampling requires a reliable selector and may spend
 the savings on unsuccessful attempts. A learned router is a later option once
 nib has representative labeled outcomes.
 
-## Delivery and Evaluation
+## Delivery and Evaluation (Rollout Plan)
 
 1. Define worker hosting, role/model candidates, ceilings, workload, and acceptance
    targets. Build baseline evidence under the same harness and task requirements.
