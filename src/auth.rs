@@ -1,19 +1,27 @@
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use nib::config::{load_config_with_source, update_nib_config, ConfigSource};
+use nib::config::{
+    load_config_with_source, load_project_settings, update_nib_config_conditionally,
+    update_user_config_in, ConfigMutation, ConfigSource,
+};
 use nib::llm::registry::{provider_descriptor, PROVIDERS};
 
 pub fn run_auth_wizard() -> Result<(), String> {
+    let home = nib::paths::NibPaths::user_home()
+        .ok_or("nib's user home cannot be found: set NIB_HOME or HOME")?;
     let stdin = io::stdin();
-    run_auth_wizard_with_input(&mut stdin.lock(), || {
-        rpassword::read_password().unwrap_or_default()
-    })
+    run_auth_wizard_with_input(
+        &mut stdin.lock(),
+        || rpassword::read_password().unwrap_or_default(),
+        &home,
+    )
 }
 
 fn run_auth_wizard_with_input(
     reader: &mut impl BufRead,
     mut read_password: impl FnMut() -> String,
+    user_home: &Path,
 ) -> Result<(), String> {
     println!("nib Auth Wizard");
     println!("================");
@@ -115,14 +123,43 @@ fn run_auth_wizard_with_input(
         }
     }
 
-    update_nib_config(&project_root, move |config| {
+    let providers: Vec<String> = updates
+        .iter()
+        .map(|(provider, _, _)| provider.clone())
+        .collect();
+    // Credentials belong to the user, never to a project (T082).
+    update_user_config_in(user_home, move |config| {
         for (provider, model, api_key) in updates {
             config.llm.add_or_update_provider(provider, model, api_key);
         }
         Ok(())
     })
     .map_err(|error| format!("failed to save configuration: {error}"))?;
-    println!("\nProviders configured in .nib/config.toml");
+    // As before, a project still on the placeholder provider switches to the
+    // one just configured; any other project choice is kept.
+    update_nib_config_conditionally(&project_root, |config| {
+        if config.llm.active_provider.as_deref() == Some("mock") && !providers.is_empty() {
+            config.llm.active_provider = None;
+            Ok(ConfigMutation::Changed(()))
+        } else {
+            Ok(ConfigMutation::Unchanged(()))
+        }
+    })
+    .map_err(|error| format!("failed to save configuration: {error}"))?;
+    println!(
+        "\nProviders configured in {}",
+        user_home.join("config.toml").display()
+    );
+    if let Ok(settings) = load_project_settings(&project_root) {
+        for provider in providers
+            .iter()
+            .filter(|provider| settings.has_provider_credentials(provider))
+        {
+            println!(
+                "Note: this project keeps its own {provider} credentials (moved from its old configuration), which take precedence here."
+            );
+        }
+    }
     println!("You can now run: nib");
     Ok(())
 }
@@ -130,7 +167,7 @@ fn run_auth_wizard_with_input(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nib::config::{config_paths, load_nib_config_full, LlmApiMode};
+    use nib::config::{config_paths, load_nib_config_full, load_user_config_in, LlmApiMode};
     use serial_test::serial;
     use std::ffi::OsString;
     use std::io::Cursor;
@@ -163,30 +200,33 @@ mod tests {
     #[serial]
     fn auth_wizard_reprompts_and_saves_mock_provider() {
         let project = tempdir().expect("project");
+        let home = tempdir().expect("user home");
         let _cwd = CurrentDirGuard::enter(project.path());
         let mut input = Cursor::new(b"999\nunknown\nmock\n\nn\n");
 
-        run_auth_wizard_with_input(&mut input, String::new).expect("auth wizard");
+        run_auth_wizard_with_input(&mut input, String::new, home.path()).expect("auth wizard");
 
-        let config = load_nib_config_full(project.path()).expect("saved config");
+        let config = load_user_config_in(home.path()).expect("saved user config");
         assert_eq!(config.llm.get_active_provider(), "mock");
         assert_eq!(config.llm.providers["mock"].model, "mock-model");
         assert_eq!(config.llm.providers["mock"].api_key, None);
+        assert!(!config_paths(project.path()).toml.exists());
     }
 
     #[test]
     #[serial]
     fn auth_wizard_accepts_numeric_provider_and_one_shot_mode() {
         let project = tempdir().expect("project");
+        let home = tempdir().expect("user home");
         let _cwd = CurrentDirGuard::enter(project.path());
         let previous_one = std::env::var_os("NIB_AUTH_ONE");
         std::env::set_var("NIB_AUTH_ONE", "1");
         let mut input = Cursor::new(b"1\ncustom-model\n");
 
-        run_auth_wizard_with_input(&mut input, || "secret-key".to_string())
+        run_auth_wizard_with_input(&mut input, || "secret-key".to_string(), home.path())
             .expect("one-shot auth wizard");
 
-        let config = load_nib_config_full(project.path()).expect("saved config");
+        let config = load_user_config_in(home.path()).expect("saved user config");
         assert_eq!(config.llm.get_active_provider(), "openai");
         assert_eq!(config.llm.providers["openai"].model, "custom-model");
         assert_eq!(
@@ -197,25 +237,69 @@ mod tests {
             config.llm.providers["openai"].api,
             Some(LlmApiMode::Responses)
         );
+        // The credential never reaches the project.
+        let project_config = config_paths(project.path()).toml;
+        assert!(!std::fs::read_to_string(project_config)
+            .unwrap_or_default()
+            .contains("secret-key"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(home.path().join("config.toml"))
+                .expect("user config")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
         restore_env("NIB_AUTH_ONE", previous_one);
+    }
+
+    #[test]
+    #[serial]
+    fn auth_wizard_moves_a_placeholder_project_to_the_new_provider() {
+        let project = tempdir().expect("project");
+        let home = tempdir().expect("user home");
+        let paths = config_paths(project.path());
+        std::fs::create_dir_all(&paths.nib_dir).expect("config directory");
+        std::fs::write(
+            &paths.toml,
+            "[llm]\nactive_provider = \"mock\"\n\n[llm.providers.mock]\nmodel = \"mock-model\"\n",
+        )
+        .expect("placeholder project");
+        let _cwd = CurrentDirGuard::enter(project.path());
+        let previous_one = std::env::var_os("NIB_AUTH_ONE");
+        std::env::set_var("NIB_AUTH_ONE", "1");
+        let mut input = Cursor::new(b"1\n\n");
+
+        run_auth_wizard_with_input(&mut input, || "secret-key".to_string(), home.path())
+            .expect("auth wizard");
+        restore_env("NIB_AUTH_ONE", previous_one);
+
+        let project_config = std::fs::read_to_string(&paths.toml).expect("project config");
+        assert!(!project_config.contains("active_provider"), "{project_config}");
+        let user = load_user_config_in(home.path()).expect("user config");
+        assert_eq!(user.llm.get_active_provider(), "openai");
     }
 
     #[test]
     #[serial]
     fn auth_wizard_preserves_corrupt_configuration() {
         let project = tempdir().expect("project");
+        let home = tempdir().expect("user home");
         let paths = config_paths(project.path());
         std::fs::create_dir_all(&paths.nib_dir).expect("config directory");
         std::fs::write(&paths.toml, "invalid = [toml").expect("corrupt config");
         let _cwd = CurrentDirGuard::enter(project.path());
         let mut input = Cursor::new(b"done\n");
 
-        let error = run_auth_wizard_with_input(&mut input, String::new)
+        let error = run_auth_wizard_with_input(&mut input, String::new, home.path())
             .expect_err("corrupt config must fail closed");
         assert!(error.contains("could not load configuration"));
         assert_eq!(
             std::fs::read_to_string(&paths.toml).expect("unchanged config"),
             "invalid = [toml"
         );
+        assert!(!home.path().join("config.toml").exists());
+        let _ = load_nib_config_full;
     }
 }

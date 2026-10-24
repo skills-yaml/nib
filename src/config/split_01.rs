@@ -11,8 +11,22 @@ pub(crate) fn with_config_lock_with_hook<T>(
         &crate::daemons::state::StableDirectory,
     ) -> Result<T, ConfigError>,
 ) -> Result<T, ConfigError> {
+    with_config_lock_at(config_paths(project_root), deadline, before_lock, operation)
+}
+
+/// Runs `operation` under the lock of the configuration file in `paths`:
+/// a project's preferences, the user configuration or a project's user
+/// settings.
+pub(crate) fn with_config_lock_at<T>(
+    paths: ConfigPaths,
+    deadline: Option<Instant>,
+    before_lock: impl FnOnce(&ConfigPaths) -> Result<(), ConfigError>,
+    operation: impl FnOnce(
+        &ConfigPaths,
+        &crate::daemons::state::StableDirectory,
+    ) -> Result<T, ConfigError>,
+) -> Result<T, ConfigError> {
     ensure_config_lock_deadline(deadline)?;
-    let paths = config_paths(project_root);
     let directory_existed = paths.nib_dir.is_dir();
     crate::fs_security::ensure_directory_without_symlinks(&paths.nib_dir)?;
     if !directory_existed {
@@ -158,7 +172,10 @@ pub(crate) fn normalized_config_path(path: &Path) -> Result<PathBuf, ConfigError
 }
 
 pub(crate) struct LoadedNibConfig {
+    /// The project's preferences on their own.
     pub(crate) config: NibConfig,
+    /// The preferences document as stored, which later saves keep the keys of.
+    pub(crate) document: toml::Value,
     pub(crate) source: ConfigSource,
     pub(crate) toml_file: Option<File>,
 }
@@ -172,52 +189,91 @@ impl LoadedNibConfig {
     }
 }
 
+/// Loads a project's preferences under their lock, converting a legacy
+/// `config.json` and migrating user-only values a local file still holds
+/// (see `layers`).
 pub(crate) fn load_nib_config_with_source_unlocked(
     paths: &ConfigPaths,
     directory: &crate::daemons::state::StableDirectory,
 ) -> Result<LoadedNibConfig, ConfigError> {
-    if regular_file_exists(directory, &paths.toml)? {
-        let (config, file) = load_nib_config_file(directory, &paths.toml)?;
-        backup_legacy_json(paths, directory, None)?;
+    let source = if regular_file_exists(directory, &paths.toml)? {
+        ConfigSource::Toml
+    } else if regular_file_exists(directory, &paths.json)? {
+        migrate_json_to_toml_unlocked(paths, directory)?;
+        ConfigSource::MigratedFromJson
+    } else {
+        let config = NibConfig::default();
+        config.validate_preferences()?;
         return Ok(LoadedNibConfig {
             config,
-            source: ConfigSource::Toml,
-            toml_file: Some(file),
+            document: toml::Value::Table(toml::Table::new()),
+            source: ConfigSource::Default,
+            toml_file: None,
         });
+    };
+    let (content, file) = read_regular_file(directory, &paths.toml)?;
+    let parsed = parse_project_file(&paths.toml, &content)?;
+    let loaded = migrate_project_file(paths, directory, &content, file, parsed)?;
+    if source == ConfigSource::Toml {
+        backup_legacy_json(paths, directory, None)?;
     }
-
-    if regular_file_exists(directory, &paths.json)? {
-        return migrate_json_to_toml_unlocked(paths, directory);
-    }
-
-    let config = NibConfig::default();
-    config.validate()?;
     Ok(LoadedNibConfig {
-        config,
-        source: ConfigSource::Default,
-        toml_file: None,
+        config: loaded.config,
+        document: loaded.document,
+        source,
+        toml_file: Some(loaded.file),
     })
 }
 
+/// Loads a project's preferences that must not hold user-only values, as
+/// after an edit: such values are rejected, not migrated.
 pub(crate) fn load_nib_config_file(
     directory: &crate::daemons::state::StableDirectory,
     path: &Path,
-) -> Result<(NibConfig, File), ConfigError> {
+) -> Result<(NibConfig, File, toml::Value), ConfigError> {
     let (content, file) = read_regular_file(directory, path)?;
-    let config: NibConfig = toml::from_str(&content)?;
-    config.validate()?;
-    Ok((config, file))
+    let (config, document, user_only) = parse_project_file(path, &content)?;
+    if user_only.has_values() {
+        return Err(user_only_error(
+            path,
+            &user_only.value_keys(),
+            "project preferences cannot hold them",
+        ));
+    }
+    Ok((config, file, document))
 }
 
+/// Reads a project's preferences without migrating them. User-only values
+/// are accepted only when they are already in the user's settings (a
+/// migration that the next locked load finishes).
 pub(crate) fn load_nib_config_opened_file(
     directory: &crate::daemons::state::StableDirectory,
     path: &Path,
     file: File,
-) -> Result<NibConfig, ConfigError> {
+) -> Result<(NibConfig, toml::Value), ConfigError> {
     let (content, _) = read_opened_regular_file(directory, path, file, false)?;
-    let config: NibConfig = toml::from_str(&content)?;
-    config.validate()?;
-    Ok(config)
+    let (config, document, user_only) = parse_project_file(path, &content)?;
+    require_migrated(path, &user_only)?;
+    Ok((config, document))
+}
+
+/// Fails when a project file read without its lock holds user-only values
+/// the user's settings do not have yet.
+pub(crate) fn require_migrated(path: &Path, user_only: &UserOnlyValues) -> Result<(), ConfigError> {
+    if !user_only.has_values() {
+        return Ok(());
+    }
+    let project_root = path.parent().and_then(Path::parent).ok_or_else(|| {
+        ConfigError::Operation("project configuration has no project folder".to_string())
+    })?;
+    if user_only.is_in(&load_project_settings(project_root)?) {
+        return Ok(());
+    }
+    Err(user_only_error(
+        path,
+        &user_only.value_keys(),
+        "they move to nib's user home the next time nib opens this project",
+    ))
 }
 
 pub(crate) fn read_regular_file(
@@ -285,15 +341,7 @@ pub(crate) fn regular_file_exists(
     directory.path_exists(path).map_err(config_state_error)
 }
 
-pub(crate) fn save_nib_config_atomic(
-    directory: &crate::daemons::state::StableDirectory,
-    path: &Path,
-    config: &NibConfig,
-    expected: crate::daemons::state::FileExpectation<'_>,
-) -> Result<(), ConfigError> {
-    save_nib_config_atomic_with_hook(directory, path, config, expected, || Ok(()))
-}
-
+#[cfg(test)]
 pub(crate) fn save_nib_config_atomic_with_hook(
     directory: &crate::daemons::state::StableDirectory,
     path: &Path,
@@ -301,8 +349,39 @@ pub(crate) fn save_nib_config_atomic_with_hook(
     expected: crate::daemons::state::FileExpectation<'_>,
     before_commit: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), ConfigError> {
-    config.validate()?;
-    let content = toml::to_string_pretty(config)?;
+    let document = preferences_document(path, config, None)?;
+    save_document_atomic_with_hook(directory, path, &document, expected, before_commit)
+}
+
+/// The document a project's preferences save to. Values equal to their
+/// defaults are left out unless `original` had them; user-only values are
+/// rejected, and their default-valued keys dropped.
+pub(crate) fn preferences_document(
+    path: &Path,
+    config: &NibConfig,
+    original: Option<&toml::Value>,
+) -> Result<toml::Value, ConfigError> {
+    config.validate_preferences()?;
+    let mut document = minimal_document(config, original)?;
+    let user_only = split_user_only(&mut document)?;
+    if user_only.has_values() {
+        return Err(user_only_error(
+            path,
+            &user_only.value_keys(),
+            "project preferences cannot hold them",
+        ));
+    }
+    Ok(document)
+}
+
+pub(crate) fn save_document_atomic_with_hook(
+    directory: &crate::daemons::state::StableDirectory,
+    path: &Path,
+    document: &toml::Value,
+    expected: crate::daemons::state::FileExpectation<'_>,
+    before_commit: impl FnOnce() -> Result<(), String>,
+) -> Result<(), ConfigError> {
+    let content = toml::to_string_pretty(document)?;
     if content.len() as u64 > MAX_CONFIG_FILE_BYTES {
         return Err(ConfigError::FileTooLarge {
             path: path.display().to_string(),
@@ -325,7 +404,7 @@ pub(crate) fn save_nib_config_atomic_with_hook(
 pub(crate) fn restore_nib_config_atomic(
     directory: &crate::daemons::state::StableDirectory,
     path: &Path,
-    config: &NibConfig,
+    document: &toml::Value,
 ) -> Result<(), ConfigError> {
     let current = if regular_file_exists(directory, path)? {
         Some(directory.open_read(path).map_err(config_state_error)?)
@@ -336,34 +415,32 @@ pub(crate) fn restore_nib_config_atomic(
         crate::daemons::state::FileExpectation::Missing,
         crate::daemons::state::FileExpectation::Present,
     );
-    save_nib_config_atomic(directory, path, config, expected)
+    save_document_atomic_with_hook(directory, path, document, expected, || Ok(()))
 }
 
+/// Converts a legacy `config.json` into `config.toml` as it was, then
+/// keeps the JSON as `config.json.bak`. The new file is then loaded like any
+/// other, so its user-only values are migrated.
 pub(crate) fn migrate_json_to_toml_unlocked(
     paths: &ConfigPaths,
     directory: &crate::daemons::state::StableDirectory,
-) -> Result<LoadedNibConfig, ConfigError> {
+) -> Result<(), ConfigError> {
     let (content, json_file) = read_regular_file(directory, &paths.json)?;
     let llm: LlmConfig = serde_json::from_str(&content)?;
     let config = NibConfig {
         revision: 1,
-        llm: llm.clone(),
+        llm,
         ..NibConfig::default()
     };
     config.validate()?;
-    save_nib_config_atomic(
+    save_document_atomic_with_hook(
         directory,
         &paths.toml,
-        &config,
+        &toml::Value::try_from(&config)?,
         crate::daemons::state::FileExpectation::Missing,
+        || Ok(()),
     )?;
-    backup_legacy_json(paths, directory, Some(&json_file))?;
-    let (config, file) = load_nib_config_file(directory, &paths.toml)?;
-    Ok(LoadedNibConfig {
-        config,
-        source: ConfigSource::MigratedFromJson,
-        toml_file: Some(file),
-    })
+    backup_legacy_json(paths, directory, Some(&json_file))
 }
 
 pub(crate) fn backup_legacy_json(

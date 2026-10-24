@@ -8,8 +8,9 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use nib::config::{
-    config_paths, load_nib_config_full_with_source, update_nib_config_conditionally,
-    ConfigMutation, LlmApiMode, NibConfig, ProviderEntry, ReasoningEffort,
+    config_paths, load_nib_config_full_with_source, load_project_settings, project_settings_path,
+    update_project_settings, update_user_config, user_config_path, LlmApiMode, NibConfig,
+    ProviderEntry, ReasoningEffort,
 };
 use nib::context::select_profile_skills;
 use nib::daemons::cron::Cron;
@@ -210,6 +211,15 @@ fn run_doctor_inner(project: &Path, fix: bool, confirm_no_legacy_processes: bool
         paths.toml.display(),
         paths.toml.exists()
     );
+    for (label, path) in [
+        ("User config", user_config_path()),
+        ("Project user settings", project_settings_path(project)),
+    ] {
+        match path {
+            Some(path) => println!("  {label}: {} (exists: {})", path.display(), path.exists()),
+            None => println!("  {label}: unavailable (set NIB_HOME or HOME)"),
+        }
+    }
 
     // 2. Git / Worktree availability
     print!("Checking git/worktree... ");
@@ -696,25 +706,59 @@ fn check_receipt_artifact(
     Ok(())
 }
 
+/// Switches the effective OpenAI provider to the Responses API where its
+/// transport is configured: the user's settings for this project when they
+/// configure OpenAI, else the user configuration. A project's own
+/// preferences cannot hold a transport (T082).
 fn repair_openai_transport(project: &Path) -> Result<bool, String> {
-    update_nib_config_conditionally(project, |config| {
-        if !openai_transport_repair_needed(config) {
-            return Ok(ConfigMutation::Unchanged(false));
-        }
-        let entry = config
-            .llm
-            .providers
-            .get_mut("openai")
-            .ok_or_else(|| "active OpenAI provider disappeared during repair".to_string())?;
-        let base = canonical_openai_base(entry)
-            .ok_or_else(|| "OpenAI endpoint changed during repair".to_string())?;
-        entry.api = Some(LlmApiMode::Responses);
-        if base == CanonicalOpenAiBase::ChatCompletions {
-            entry.base_url = Some("https://api.openai.com/v1".to_string());
-        }
-        Ok(ConfigMutation::Changed(true))
-    })
-    .map_err(|error| error.to_string())
+    let (config, _) =
+        load_nib_config_full_with_source(project).map_err(|error| error.to_string())?;
+    if !openai_transport_repair_needed(&config) {
+        return Ok(false);
+    }
+    let entry = config
+        .llm
+        .providers
+        .get("openai")
+        .ok_or_else(|| "active OpenAI provider disappeared during repair".to_string())?;
+    let base = canonical_openai_base(entry)
+        .ok_or_else(|| "OpenAI endpoint changed during repair".to_string())?;
+    let base_url = (base == CanonicalOpenAiBase::ChatCompletions)
+        .then(|| "https://api.openai.com/v1".to_string());
+    let settings = load_project_settings(project).map_err(|error| error.to_string())?;
+    if settings.llm.providers.contains_key("openai") {
+        update_project_settings(project, move |settings| {
+            let openai = settings
+                .llm
+                .providers
+                .entry("openai".to_string())
+                .or_default();
+            openai.api = Some(LlmApiMode::Responses);
+            if base_url.is_some() {
+                openai.base_url = base_url;
+            }
+            Ok(())
+        })
+    } else {
+        let model = entry.model.clone();
+        update_user_config(move |config| {
+            let openai = config
+                .llm
+                .providers
+                .entry("openai".to_string())
+                .or_insert_with(|| ProviderEntry {
+                    model,
+                    ..ProviderEntry::default()
+                });
+            openai.api = Some(LlmApiMode::Responses);
+            if base_url.is_some() {
+                openai.base_url = base_url;
+            }
+            Ok(())
+        })
+    }
+    .map_err(|error| error.to_string())?;
+    Ok(true)
 }
 
 fn active_provider_diagnostic_lines(config: &NibConfig) -> Result<Vec<String>, String> {

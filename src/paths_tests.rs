@@ -38,14 +38,103 @@ fn project_directory_name_checks_are_exact_or_case_insensitive() {
 
 #[test]
 fn unit_tests_see_only_an_isolated_user_home() {
-    assert_eq!(NibPaths::user_home(), None);
+    let shared = NibPaths::user_home().expect("process test home");
+    assert_eq!(shared, test_home::process_home());
+    if let Some(real) = std::env::var_os("HOME") {
+        assert!(!shared.starts_with(PathBuf::from(real).join(".nib")));
+    }
     let home = TestNibHome::isolated();
     assert_eq!(
         NibPaths::user_home().as_deref(),
         Some(home.directory.path())
     );
+    assert_eq!(
+        NibPaths::user_config_file(),
+        Some(home.directory.path().join("config.toml"))
+    );
     drop(home);
-    assert_eq!(NibPaths::user_home(), None);
+    assert_eq!(NibPaths::user_home(), Some(shared));
+}
+
+#[test]
+fn project_keys_are_stable_readable_and_distinct() {
+    let first = tempfile::tempdir().expect("first project");
+    let second = tempfile::tempdir().expect("second project");
+    let named = first.path().join("My Project");
+    std::fs::create_dir(&named).expect("named project");
+
+    let key = NibPaths::project_key(&named).expect("key");
+    assert_eq!(NibPaths::project_key(&named), Some(key.clone()));
+    assert!(key.starts_with("My-Project-"), "{key}");
+    assert_eq!(key.len(), "My-Project-".len() + 2 * PROJECT_KEY_HASH_BYTES);
+    assert_ne!(
+        NibPaths::project_key(first.path()),
+        NibPaths::project_key(second.path())
+    );
+    assert_eq!(NibPaths::project_key(&first.path().join("missing")), None);
+
+    let _home = TestNibHome::isolated();
+    let directory = NibPaths::user_project_dir(&named).expect("project directory");
+    assert_eq!(
+        directory,
+        NibPaths::user_home().unwrap().join("projects").join(key)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_linked_worktree_shares_its_main_project_key() {
+    let project = tempfile::tempdir().expect("project");
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(project.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    git(&[
+        "-c",
+        "user.name=nib",
+        "-c",
+        "user.email=nib@example.invalid",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "init",
+    ]);
+    let linked = project.path().join("linked");
+    git(&["worktree", "add", "-q", "linked"]);
+
+    assert_eq!(
+        NibPaths::project_identity_root(&linked),
+        Some(project.path().canonicalize().unwrap())
+    );
+    assert_eq!(
+        NibPaths::project_key(&linked),
+        NibPaths::project_key(project.path())
+    );
+    // A planted pointer that the repository does not link back to is not
+    // accepted as a worktree of another project.
+    let planted = tempfile::tempdir().expect("planted");
+    std::fs::write(
+        planted.path().join(".git"),
+        format!(
+            "gitdir: {}\n",
+            project.path().join(".git/worktrees/linked").display()
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        NibPaths::project_identity_root(planted.path()),
+        Some(planted.path().canonicalize().unwrap())
+    );
 }
 
 /// Files compiled only for tests: by name, or included through `#[path]`

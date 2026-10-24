@@ -11,6 +11,7 @@
 //! - [`NibPaths::project_prefs`]: a project's preferences (`config.toml`,
 //!   `skills/`), which may hold no secrets and no safety settings.
 
+use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
@@ -24,13 +25,29 @@ pub const PROJECT_DIR_EXCLUDE_PATHSPEC: &str = ":(exclude).nib/**";
 #[cfg(not(test))]
 const USER_HOME_DIR_NAME: &str = ".nib";
 
+/// The user configuration file inside the user home.
+const USER_CONFIG_FILE: &str = "config.toml";
+
+/// Directory, inside the user home, of per-project user settings.
+const USER_PROJECTS_DIR: &str = "projects";
+
+/// Bytes of the canonical-root digest kept in a project key.
+const PROJECT_KEY_HASH_BYTES: usize = 8;
+
+/// Characters of the folder name kept in a project key.
+const MAX_PROJECT_KEY_NAME_CHARS: usize = 40;
+
+/// Largest Git pointer file read while resolving a linked worktree.
+const MAX_GIT_POINTER_BYTES: u64 = 64 * 1024;
+
 /// Resolves nib's on-disk locations. It carries no state: every location is
 /// derived from the project root it is given, or from the environment.
 pub struct NibPaths;
 
 impl NibPaths {
-    /// `$NIB_HOME`, else `~/.nib`. Unit tests use only `TestNibHome`, never
-    /// the developer's home or the process environment.
+    /// `$NIB_HOME`, else `~/.nib`. Unit tests use only a `TestNibHome` or a
+    /// temporary home of the test process, never the developer's home or the
+    /// process environment.
     pub fn user_home() -> Option<PathBuf> {
         #[cfg(test)]
         {
@@ -46,6 +63,64 @@ impl NibPaths {
                 .filter(|value| !value.is_empty())
                 .map(|home| PathBuf::from(home).join(USER_HOME_DIR_NAME))
         }
+    }
+
+    /// The user configuration file, `<user home>/config.toml`.
+    pub fn user_config_file() -> Option<PathBuf> {
+        Self::user_home().map(|home| home.join(USER_CONFIG_FILE))
+    }
+
+    /// The canonical root a project's user-level settings are keyed by. A
+    /// linked Git worktree (a session or subagent worktree) resolves to its
+    /// main checkout, so it shares that project's settings.
+    pub fn project_identity_root(project_root: &Path) -> Option<PathBuf> {
+        let root = project_root.canonicalize().ok()?;
+        Some(main_worktree(&root).unwrap_or(root))
+    }
+
+    /// The main checkout when `root` is a linked Git worktree.
+    pub fn linked_worktree_main(root: &Path) -> Option<PathBuf> {
+        main_worktree(&root.canonicalize().ok()?)
+    }
+
+    /// A stable name for a project inside the user home: its folder name,
+    /// reduced to portable characters, and a SHA-256 prefix of its canonical
+    /// root. Copying or moving the project therefore changes the key.
+    pub fn project_key(project_root: &Path) -> Option<String> {
+        let root = Self::project_identity_root(project_root)?;
+        let name: String = root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+            .chars()
+            .map(|char| {
+                if char.is_ascii_alphanumeric() || matches!(char, '-' | '_' | '.') {
+                    char
+                } else {
+                    '-'
+                }
+            })
+            .take(MAX_PROJECT_KEY_NAME_CHARS)
+            .collect();
+        let name = name.trim_start_matches('.');
+        let digest = Sha256::digest(root.as_os_str().as_encoded_bytes());
+        let hash: String = digest[..PROJECT_KEY_HASH_BYTES]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        Some(if name.is_empty() {
+            hash
+        } else {
+            format!("{name}-{hash}")
+        })
+    }
+
+    /// A project's user-level directory, `<user home>/projects/<key>`. It
+    /// holds what the project itself must not set: credentials, endpoints,
+    /// approvals, the sandbox level and trust.
+    pub fn user_project_dir(project_root: &Path) -> Option<PathBuf> {
+        let key = Self::project_key(project_root)?;
+        Some(Self::user_home()?.join(USER_PROJECTS_DIR).join(key))
     }
 
     /// The directory that holds a project's runtime state.
@@ -107,6 +182,43 @@ impl NibPaths {
     }
 }
 
+/// The main checkout of a linked worktree, accepted only when the repository
+/// links back to this worktree, so a crafted `.git` file cannot claim
+/// another project's settings.
+fn main_worktree(root: &Path) -> Option<PathBuf> {
+    let pointer = root.join(".git");
+    if !std::fs::symlink_metadata(&pointer)
+        .ok()?
+        .file_type()
+        .is_file()
+    {
+        return None;
+    }
+    let text = read_git_pointer(&pointer)?;
+    let gitdir = root
+        .join(text.trim().strip_prefix("gitdir:")?.trim())
+        .canonicalize()
+        .ok()?;
+    let back_link = read_git_pointer(&gitdir.join("gitdir"))?;
+    if gitdir.join(back_link.trim()).canonicalize().ok()? != pointer.canonicalize().ok()? {
+        return None;
+    }
+    let common = read_git_pointer(&gitdir.join("commondir"))?;
+    let common = gitdir.join(common.trim()).canonicalize().ok()?;
+    if common.file_name()? != ".git" || gitdir.parent()? != common.join("worktrees") {
+        return None;
+    }
+    common.parent().map(Path::to_path_buf)
+}
+
+fn read_git_pointer(path: &Path) -> Option<String> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_GIT_POINTER_BYTES {
+        return None;
+    }
+    std::fs::read_to_string(path).ok()
+}
+
 #[cfg(test)]
 pub(crate) use test_home::TestNibHome;
 
@@ -119,8 +231,25 @@ mod test_home {
             const { std::cell::RefCell::new(None) };
     }
 
+    /// The current thread's `TestNibHome`, else one temporary home shared by
+    /// the test process. Per-project settings are keyed by project, so tests
+    /// with their own temporary projects do not meet in it; a test that
+    /// writes the user configuration itself takes a `TestNibHome`.
     pub(super) fn current() -> Option<PathBuf> {
-        TEST_HOME.with(|home| home.borrow().clone())
+        TEST_HOME
+            .with(|home| home.borrow().clone())
+            .or_else(|| Some(process_home().to_path_buf()))
+    }
+
+    pub(crate) fn process_home() -> &'static std::path::Path {
+        static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        HOME.get_or_init(|| {
+            tempfile::Builder::new()
+                .prefix("nib-unit-test-home-")
+                .tempdir()
+                .expect("unit test nib home")
+        })
+        .path()
     }
 
     /// A temporary user home for the current test thread.

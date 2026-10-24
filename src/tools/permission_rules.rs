@@ -177,43 +177,13 @@ struct PermissionsFile {
 /// Settings are keyed by the canonical project folder. A linked Git worktree
 /// (a session or subagent worktree) uses its main project's settings.
 fn project_key(project_root: &Path) -> Option<String> {
-    let root = project_root.canonicalize().ok()?;
-    let root = main_worktree(&root).unwrap_or(root);
-    Some(root.display().to_string())
+    crate::paths::NibPaths::project_identity_root(project_root)
+        .map(|root| root.display().to_string())
 }
 
 /// The main checkout when `root` is a linked Git worktree.
 pub(crate) fn linked_worktree_main(root: &Path) -> Option<PathBuf> {
-    main_worktree(&root.canonicalize().ok()?)
-}
-
-/// The main checkout of a linked worktree, accepted only when the repository
-/// links back to this worktree, so a crafted `.git` file cannot claim
-/// another project's trust.
-fn main_worktree(root: &Path) -> Option<PathBuf> {
-    let pointer = root.join(".git");
-    if !std::fs::symlink_metadata(&pointer)
-        .ok()?
-        .file_type()
-        .is_file()
-    {
-        return None;
-    }
-    let text = read_bounded(&pointer)?;
-    let gitdir = root
-        .join(text.trim().strip_prefix("gitdir:")?.trim())
-        .canonicalize()
-        .ok()?;
-    let back_link = read_bounded(&gitdir.join("gitdir"))?;
-    if gitdir.join(back_link.trim()).canonicalize().ok()? != pointer.canonicalize().ok()? {
-        return None;
-    }
-    let common = read_bounded(&gitdir.join("commondir"))?;
-    let common = gitdir.join(common.trim()).canonicalize().ok()?;
-    if common.file_name()? != ".git" || gitdir.parent()? != common.join("worktrees") {
-        return None;
-    }
-    common.parent().map(Path::to_path_buf)
+    crate::paths::NibPaths::linked_worktree_main(root)
 }
 
 fn read_bounded(path: &Path) -> Option<String> {
