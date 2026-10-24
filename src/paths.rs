@@ -14,8 +14,9 @@
 //! - [`NibPaths::project_prefs`]: a project's preferences (`config.toml`,
 //!   `skills/`), which may hold no secrets and no safety settings. The same
 //!   in-project directory, [`NibPaths::project_dir`], also holds the legacy
-//!   state of older versions, legacy managed worktrees and, until T082 phase
-//!   4, the session files.
+//!   state and session files of older versions and legacy managed worktrees.
+//! - [`NibPaths::session_database`]: `<user home>/nib.db`, the sessions of
+//!   every project whose state lives in the user home (T082 phase 4).
 
 use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
@@ -36,6 +37,9 @@ const USER_CONFIG_FILE: &str = "config.toml";
 
 /// Directory, inside the user home, of per-project user settings.
 const USER_PROJECTS_DIR: &str = "projects";
+
+/// The session database inside the user home.
+const SESSION_DATABASE_FILE: &str = "nib.db";
 
 /// Bytes of the canonical-root digest kept in a project key.
 const PROJECT_KEY_HASH_BYTES: usize = 8;
@@ -80,16 +84,22 @@ pub(crate) const LEGACY_STATE_ENTRIES: [&str; 8] = [
     "worktree-ownership",
 ];
 
-/// Non-session entries of a profile's legacy state directory
-/// (`.nib/profiles/<id>`). Sessions and what belongs to them (checkpoints,
-/// read ledgers, presence) stay until the SQLite sessions of T082 phase 4.
-pub(crate) const LEGACY_PROFILE_STATE_ENTRIES: [&str; 5] = [
+/// Entries of a profile's legacy state directory (`.nib/profiles/<id>`)
+/// that move as they are. The session files themselves are imported into
+/// the session database instead (T082 phase 4, [`LEGACY_PROFILE_SESSIONS`]).
+pub(crate) const LEGACY_PROFILE_STATE_ENTRIES: [&str; 8] = [
     ".legacy-state-migration-v1.json",
+    "checkpoints",
     "context.json",
     "daemons",
+    "file_reads",
     "managed-skills",
     "memory.json",
+    "presence",
 ];
+
+/// The session directory of a profile's legacy state directory.
+pub(crate) const LEGACY_PROFILE_SESSIONS: &str = "sessions";
 
 /// Most profile directories inspected for legacy state.
 const MAX_LEGACY_PROFILE_DIRS: usize = 256;
@@ -137,6 +147,67 @@ impl NibPaths {
     /// The user configuration file, `<user home>/config.toml`.
     pub fn user_config_file() -> Option<PathBuf> {
         Self::user_home().map(|home| home.join(USER_CONFIG_FILE))
+    }
+
+    /// The session database, `<user home>/nib.db` (T082 phase 4).
+    pub fn session_database() -> Option<PathBuf> {
+        Self::state_home().map(|home| home.join(SESSION_DATABASE_FILE))
+    }
+
+    /// The project key and profile id of a session directory whose sessions
+    /// live in the session database: the default session directory of a
+    /// project's user-home state, `<user home>/projects/<key>/profiles/<id>/sessions`.
+    /// Any other session directory (a configured `state_dir`, a managed
+    /// worktree, a project whose state has not moved yet) keeps its sessions
+    /// as files.
+    pub fn database_session_scope(sessions_dir: &Path) -> Option<(String, String)> {
+        let projects = projects_dir(Self::state_home()?);
+        let sessions = crate::fs_security::absolute_path(sessions_dir).ok()?;
+        let sessions = sessions.canonicalize().unwrap_or(sessions);
+        let relative = sessions.strip_prefix(&projects).ok()?;
+        let parts: Vec<&str> = relative
+            .components()
+            .map(|component| match component {
+                std::path::Component::Normal(name) => name.to_str(),
+                _ => None,
+            })
+            .collect::<Option<_>>()?;
+        match parts.as_slice() {
+            [key, PROFILES_DIR, profile, "sessions"]
+                if !key.is_empty() && !key.starts_with('.') && !profile.is_empty() =>
+            {
+                Some(((*key).to_string(), (*profile).to_string()))
+            }
+            _ => None,
+        }
+    }
+
+    /// The default session directory a database scope belongs to.
+    pub fn database_sessions_dir(project_key: &str, profile_id: &str) -> Option<PathBuf> {
+        Some(
+            projects_dir(Self::state_home()?)
+                .join(project_key)
+                .join(PROFILES_DIR)
+                .join(profile_id)
+                .join("sessions"),
+        )
+    }
+
+    /// The user-home directories of every project, `<user home>/projects/*`.
+    pub fn user_project_dirs() -> Vec<PathBuf> {
+        let Some(home) = Self::state_home() else {
+            return Vec::new();
+        };
+        let Ok(entries) = std::fs::read_dir(projects_dir(home)) else {
+            return Vec::new();
+        };
+        let mut dirs: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .map(|entry| entry.path())
+            .collect();
+        dirs.sort();
+        dirs
     }
 
     /// The canonical root a project's user-level settings are keyed by. A
@@ -239,6 +310,7 @@ impl NibPaths {
             .any(|profile| {
                 LEGACY_PROFILE_STATE_ENTRIES
                     .iter()
+                    .chain(std::iter::once(&LEGACY_PROFILE_SESSIONS))
                     .any(|entry| std::fs::symlink_metadata(profile.path().join(entry)).is_ok())
             })
     }
@@ -251,11 +323,13 @@ impl NibPaths {
             .join(profile_id)
     }
 
-    /// The default session directory of a profile rooted at `profile_root`.
-    /// Sessions stay in the project, `.nib/profiles/<id>/sessions`, until
-    /// they move to SQLite (T082 phase 4).
+    /// The default session directory of a profile rooted at `profile_root`,
+    /// `<state>/profiles/<id>/sessions`. In the user home its sessions live in
+    /// the session database ([`Self::database_session_scope`]); the directory
+    /// keeps what belongs to them (locks, run leases, and beside it
+    /// checkpoints, read ledgers and presence).
     pub fn profile_sessions(profile_root: &Path, profile_id: &str) -> PathBuf {
-        Self::legacy_profile_state(profile_root, profile_id).join("sessions")
+        Self::profile_state(profile_root, profile_id).join(LEGACY_PROFILE_SESSIONS)
     }
 
     /// A profile's state directory before T082, `.nib/profiles/<id>`.

@@ -35,8 +35,9 @@ impl SessionStore {
         }
     }
 
+    /// A store of JSON sessions in `<project_root>/.nib/sessions`, the
+    /// layout before profiles. Runtime code opens its profile's store.
     pub fn new(project_root: &Path) -> Self {
-        // Sessions stay in the project until T082 phase 4.
         let nib = crate::paths::NibPaths::project_dir(project_root);
         let sessions_dir = nib.join("sessions");
         Self::at_dir(sessions_dir)
@@ -188,6 +189,7 @@ impl SessionStore {
         ensure_session_store_open_deadline(deadline)?;
         let (sessions_dir, directory, parent_directory, identity_file) =
             open_existing_session_directory_until(&sessions_dir, deadline)?;
+        let database = StoreDatabase::for_sessions_dir(&sessions_dir)?;
         ensure_session_store_open_deadline(deadline)?;
         Ok(Self {
             sessions_dir,
@@ -198,6 +200,7 @@ impl SessionStore {
             lock_timeout: None,
             lock_deadline: Some(deadline),
             sensitive_values: Arc::new(config.public_session_sensitive_values()),
+            database,
         })
     }
 
@@ -216,6 +219,7 @@ impl SessionStore {
                 sessions_dir.display()
             ));
         }
+        let database = StoreDatabase::for_sessions_dir(&sessions_dir)?;
         ensure_session_store_open_deadline(deadline)?;
         Ok(Self {
             sessions_dir,
@@ -226,6 +230,7 @@ impl SessionStore {
             lock_timeout: None,
             lock_deadline: Some(deadline),
             sensitive_values: Arc::new(Vec::new()),
+            database,
         })
     }
 
@@ -262,8 +267,12 @@ impl SessionStore {
     pub fn at_dir(sessions_dir: PathBuf) -> Self {
         let requested = crate::fs_security::absolute_path(&sessions_dir)
             .unwrap_or_else(|_| sessions_dir.clone());
-        match open_session_directory(&requested) {
-            Ok((sessions_dir, directory, parent_directory, identity_file)) => Self {
+        let opened = open_session_directory(&requested).and_then(|opened| {
+            let database = StoreDatabase::for_sessions_dir(&opened.0)?;
+            Ok((opened, database))
+        });
+        match opened {
+            Ok(((sessions_dir, directory, parent_directory, identity_file), database)) => Self {
                 sessions_dir,
                 directory: Some(Arc::new(directory)),
                 parent_directory: Some(Arc::new(parent_directory)),
@@ -272,6 +281,7 @@ impl SessionStore {
                 lock_timeout: None,
                 lock_deadline: None,
                 sensitive_values: Arc::new(Vec::new()),
+                database,
             },
             Err(error) => Self {
                 sessions_dir: requested,
@@ -284,6 +294,7 @@ impl SessionStore {
                 lock_timeout: None,
                 lock_deadline: None,
                 sensitive_values: Arc::new(Vec::new()),
+                database: None,
             },
         }
     }
@@ -623,6 +634,17 @@ impl SessionStore {
         id: &str,
         after_read: impl FnOnce() -> Result<(), SessionError>,
     ) -> Result<Option<OpenedSession>, SessionError> {
+        if let Some(store) = &self.database {
+            let Some(stored) = store.database.load(&store.scope, id)? else {
+                return Ok(None);
+            };
+            after_read()?;
+            return Ok(Some(OpenedSession {
+                session: stored.session,
+                handle: SessionHandle::Row(stored.row),
+                metadata: SessionRecordMetadata::new(Some(stored.modified), stored.byte_len),
+            }));
+        }
         let path = self.path(id);
         if !directory
             .path_exists(&path)
@@ -665,8 +687,8 @@ impl SessionStore {
         session.validate()?;
         Ok(Some(OpenedSession {
             session,
-            file,
-            metadata,
+            handle: SessionHandle::File(file),
+            metadata: SessionRecordMetadata::from_file(&metadata),
         }))
     }
 
@@ -695,7 +717,7 @@ impl SessionStore {
     pub(crate) fn load_result_with_metadata(
         &self,
         id: &str,
-    ) -> Result<Option<(Session, fs::Metadata)>, SessionError> {
+    ) -> Result<Option<(Session, SessionRecordMetadata)>, SessionError> {
         self.with_session_lock(id, |directory| {
             Ok(self
                 .load_opened_unlocked(directory, id)?
@@ -738,7 +760,7 @@ impl SessionStore {
         &self,
         session: &Session,
         external_guard: &mut impl FnMut() -> Result<(), String>,
-    ) -> Result<File, SessionError> {
+    ) -> Result<SessionHandle, SessionError> {
         let id = session.id.as_str();
         self.validate_session_id(id)?;
         self.verify_directory_binding()?;
@@ -749,6 +771,9 @@ impl SessionStore {
         })?;
         ensure_session_lock_deadline(Some(deadline), &self.path(id))?;
         external_guard().map_err(SessionError::InvalidMutation)?;
+        if let Some(store) = &self.database {
+            return self.create_unpublished_row(store, session, deadline, external_guard);
+        }
         let directory = self.directory()?;
         let path = self.path(id);
         if directory
@@ -832,7 +857,38 @@ impl SessionStore {
         }
         ensure_session_lock_deadline(Some(deadline), &path)?;
         external_guard().map_err(SessionError::InvalidMutation)?;
-        Ok(receipt.file)
+        Ok(SessionHandle::File(receipt.file))
+    }
+
+    /// [`Self::create_unpublished_session_with_receipt_and_guard`] for a
+    /// store in the session database: the row's generation is the receipt.
+    fn create_unpublished_row(
+        &self,
+        store: &StoreDatabase,
+        session: &Session,
+        deadline: Instant,
+        external_guard: &mut impl FnMut() -> Result<(), String>,
+    ) -> Result<SessionHandle, SessionError> {
+        let id = session.id.as_str();
+        let path = self.path(id);
+        if store.database.load(&store.scope, id)?.is_some() {
+            return Err(SessionError::InvalidMutation(format!(
+                "unpublished session already exists: {id}"
+            )));
+        }
+        session.validate()?;
+        let encoded = database::EncodedSession::encode(session)?;
+        ensure_session_lock_deadline(Some(deadline), &path)?;
+        let row = store
+            .database
+            .write(&store.scope, session, encoded, None, || {
+                external_guard().map_err(SessionError::InvalidMutation)?;
+                ensure_session_lock_deadline(Some(deadline), &path)?;
+                self.verify_directory_binding()
+            })?;
+        ensure_session_lock_deadline(Some(deadline), &path)?;
+        external_guard().map_err(SessionError::InvalidMutation)?;
+        Ok(SessionHandle::Row(row))
     }
 
     pub fn create_session_with_id(&self, id: impl Into<String>) -> Session {
@@ -845,7 +901,7 @@ impl SessionStore {
         &self,
         directory: &crate::daemons::state::StableDirectory,
         session: &Session,
-        expected: Option<&File>,
+        expected: Option<&SessionHandle>,
     ) -> Result<(), SessionError> {
         self.save_unlocked_with_commit_check(directory, session, expected, || Ok(()))
     }
@@ -854,7 +910,7 @@ impl SessionStore {
         &self,
         directory: &crate::daemons::state::StableDirectory,
         session: &Session,
-        expected: Option<&File>,
+        expected: Option<&SessionHandle>,
         before_commit: impl FnOnce() -> Result<(), SessionError>,
     ) -> Result<(), SessionError> {
         self.save_unlocked_with_namespace_guard(
@@ -870,11 +926,24 @@ impl SessionStore {
         &self,
         directory: &crate::daemons::state::StableDirectory,
         session: &Session,
-        expected: Option<&File>,
+        expected: Option<&SessionHandle>,
         namespace_guard: &mut impl FnMut() -> Result<(), SessionError>,
         before_commit: impl FnOnce() -> Result<(), SessionError>,
     ) -> Result<(), SessionError> {
         session.validate()?;
+        if let Some(store) = &self.database {
+            return self.save_row(store, session, expected, namespace_guard, before_commit);
+        }
+        let expected = expected
+            .map(|handle| {
+                handle.file().ok_or_else(|| {
+                    SessionError::InvalidMutation(format!(
+                        "session {} was not read from this session directory",
+                        session.id
+                    ))
+                })
+            })
+            .transpose()?;
         let path = self.path(&session.id);
         let data = serde_json::to_vec_pretty(session)?;
         if data.len() as u64 > MAX_SESSION_JSON_BYTES {
@@ -923,11 +992,56 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Saves a session of the session database in one transaction guarded by
+    /// the row the caller read; the transaction replaces the file store's
+    /// read-back verification.
+    fn save_row(
+        &self,
+        store: &StoreDatabase,
+        session: &Session,
+        expected: Option<&SessionHandle>,
+        namespace_guard: &mut impl FnMut() -> Result<(), SessionError>,
+        before_commit: impl FnOnce() -> Result<(), SessionError>,
+    ) -> Result<(), SessionError> {
+        let expected = expected
+            .map(|handle| {
+                handle.row().ok_or_else(|| {
+                    SessionError::InvalidMutation(format!(
+                        "session {} was not read from the session database",
+                        session.id
+                    ))
+                })
+            })
+            .transpose()?;
+        let encoded = database::EncodedSession::encode(session)?;
+        let size = encoded.byte_len();
+        if size > MAX_SESSION_JSON_BYTES {
+            return Err(SessionError::FileTooLarge {
+                path: format!("{}/{}", store.scope.scope, session.id),
+                size,
+                max: MAX_SESSION_JSON_BYTES,
+            });
+        }
+        namespace_guard()?;
+        self.verify_directory_binding()?;
+        store
+            .database
+            .write(&store.scope, session, encoded, expected, || {
+                namespace_guard()?;
+                self.verify_directory_binding()?;
+                before_commit()?;
+                self.verify_directory_binding()
+            })?;
+        namespace_guard()?;
+        self.verify_directory_binding()?;
+        namespace_guard()
+    }
+
     pub(crate) fn save_unlocked_with_deadline(
         &self,
         directory: &crate::daemons::state::StableDirectory,
         session: &Session,
-        expected: Option<&File>,
+        expected: Option<&SessionHandle>,
         deadline: Option<Instant>,
     ) -> Result<(), SessionError> {
         self.save_unlocked_with_deadline_and_commit_check(
@@ -943,7 +1057,7 @@ impl SessionStore {
         &self,
         directory: &crate::daemons::state::StableDirectory,
         session: &Session,
-        expected: Option<&File>,
+        expected: Option<&SessionHandle>,
         deadline: Option<Instant>,
         before_commit: impl FnOnce() -> Result<(), SessionError>,
     ) -> Result<(), SessionError> {
@@ -1011,7 +1125,7 @@ impl SessionStore {
             self.save_unlocked_with_deadline(
                 directory,
                 &next,
-                opened.as_ref().map(|opened| &opened.file),
+                opened.as_ref().map(|opened| &opened.handle),
                 deadline,
             )
         };
@@ -1072,7 +1186,7 @@ impl SessionStore {
             self.save_unlocked_with_deadline(
                 directory,
                 &opened.session,
-                Some(&opened.file),
+                Some(&opened.handle),
                 deadline,
             )?;
             Ok(result)
@@ -1145,7 +1259,7 @@ impl SessionStore {
             self.save_unlocked_with_deadline(
                 directory,
                 &session,
-                opened.as_ref().map(|opened| &opened.file),
+                opened.as_ref().map(|opened| &opened.handle),
                 deadline,
             )?;
             Ok(result)
@@ -1161,7 +1275,7 @@ impl SessionStore {
     pub fn delete_if(
         &self,
         id: &str,
-        should_delete: impl FnOnce(&Session, &fs::Metadata) -> bool,
+        should_delete: impl FnOnce(&Session, &SessionRecordMetadata) -> bool,
     ) -> Result<SessionDeleteOutcome, SessionError> {
         self.delete_if_with_commit_check(id, should_delete, || Ok(()))
     }
@@ -1169,30 +1283,44 @@ impl SessionStore {
     pub(crate) fn delete_if_with_commit_check(
         &self,
         id: &str,
-        should_delete: impl FnOnce(&Session, &fs::Metadata) -> bool,
+        should_delete: impl FnOnce(&Session, &SessionRecordMetadata) -> bool,
         before_delete: impl FnOnce() -> Result<(), SessionError>,
     ) -> Result<SessionDeleteOutcome, SessionError> {
         let deadline = self.lock_deadline();
         let operation = || {
             let session_operation = |directory: &crate::daemons::state::StableDirectory| {
                 let path = self.path(id);
-                directory
-                    .recover_quarantined_file(&path, ".nib-session-delete-")
-                    .map_err(SessionError::InvalidMutation)?;
+                if self.database.is_none() {
+                    directory
+                        .recover_quarantined_file(&path, ".nib-session-delete-")
+                        .map_err(SessionError::InvalidMutation)?;
+                }
                 let Some(opened) = self.load_opened_unlocked(directory, id)? else {
                     return Ok(SessionDeleteOutcome::Missing);
                 };
                 if !should_delete(&opened.session, &opened.metadata) {
                     return Ok(SessionDeleteOutcome::Retained);
                 }
-                directory
-                    .remove_file_if_matches_with_hook(
-                        &path,
-                        &opened.file,
-                        ".nib-session-delete-",
-                        || before_delete().map_err(|error| error.to_string()),
-                    )
-                    .map_err(SessionError::InvalidMutation)?;
+                match (&self.database, &opened.handle) {
+                    (Some(store), SessionHandle::Row(row)) => {
+                        store
+                            .database
+                            .delete(&store.scope, id, row, before_delete)?;
+                    }
+                    (None, SessionHandle::File(file)) => directory
+                        .remove_file_if_matches_with_hook(
+                            &path,
+                            file,
+                            ".nib-session-delete-",
+                            || before_delete().map_err(|error| error.to_string()),
+                        )
+                        .map_err(SessionError::InvalidMutation)?,
+                    _ => {
+                        return Err(SessionError::InvalidMutation(format!(
+                            "session {id} was read from another store"
+                        )))
+                    }
+                }
                 self.verify_directory_binding()?;
                 Ok(SessionDeleteOutcome::Deleted)
             };
@@ -1365,7 +1493,7 @@ impl SessionStore {
                 self.save_unlocked_with_deadline_and_commit_check(
                     directory,
                     &session,
-                    opened.as_ref().map(|opened| &opened.file),
+                    opened.as_ref().map(|opened| &opened.handle),
                     Some(deadline),
                     || {
                         pause_record_event_once_commit(deadline);
@@ -1420,6 +1548,15 @@ impl SessionStore {
         deadline: Option<Instant>,
     ) -> Result<Vec<String>, SessionError> {
         self.verify_directory_binding()?;
+        if let Some(store) = &self.database {
+            return self.list_rows(
+                store,
+                max_sessions,
+                max_total_bytes,
+                validate_contents,
+                deadline,
+            );
+        }
         let directory = self.directory()?;
         directory
             .recover_stale_temporary_files_strict(
@@ -1514,6 +1651,59 @@ impl SessionStore {
                             SessionError::InvalidMutation(format!(
                                 "session disappeared during enumeration: {}",
                                 path.display()
+                            ))
+                        })
+                };
+                match deadline {
+                    Some(deadline) => self.with_session_lock_until(id, deadline, validate),
+                    None => self.with_session_lock(id, validate),
+                }?;
+            }
+        }
+        self.verify_directory_binding()?;
+        Ok(ids)
+    }
+
+    /// [`Self::list_entries_result`] for a store in the session database.
+    fn list_rows(
+        &self,
+        store: &StoreDatabase,
+        max_sessions: usize,
+        max_total_bytes: Option<u64>,
+        validate_contents: bool,
+        deadline: Option<Instant>,
+    ) -> Result<Vec<String>, SessionError> {
+        let rows = store.database.list(&store.scope)?;
+        if rows.len() > max_sessions {
+            return Err(SessionError::InvalidMutation(format!(
+                "session directory {} exceeds the {max_sessions}-session limit",
+                self.sessions_dir.display()
+            )));
+        }
+        let mut total_bytes = 0_u64;
+        let mut ids = Vec::with_capacity(rows.len());
+        for (id, bytes) in rows {
+            self.validate_session_id(&id)?;
+            total_bytes = total_bytes.checked_add(bytes).ok_or_else(|| {
+                SessionError::InvalidMutation(
+                    "profile session byte count overflowed during enumeration".to_string(),
+                )
+            })?;
+            if let Some(maximum) = max_total_bytes.filter(|maximum| total_bytes > *maximum) {
+                return Err(SessionError::InvalidMutation(format!(
+                    "profile sessions exceed the {maximum}-byte skill usage aggregation limit"
+                )));
+            }
+            ids.push(id);
+        }
+        if validate_contents {
+            for id in &ids {
+                let validate = |locked_directory: &crate::daemons::state::StableDirectory| {
+                    self.load_opened_unlocked(locked_directory, id)?
+                        .map(|_| ())
+                        .ok_or_else(|| {
+                            SessionError::InvalidMutation(format!(
+                                "session disappeared during enumeration: {id}"
                             ))
                         })
                 };

@@ -57,9 +57,9 @@ struct ProfileDirs {
 
 impl ProfileDirs {
     /// A configured `state_dir` holds everything, inside the profile root.
-    /// The default keeps the state in the project's state directory and the
-    /// sessions in the project's `.nib/profiles/<id>/sessions` (they move to
-    /// SQLite in T082 phase 4).
+    /// The default keeps the state and the session directory in the
+    /// project's state directory; in the user home the sessions themselves
+    /// live in the session database (T082 phase 4).
     fn resolve(root: &Path, id: &str, configured: Option<&Path>) -> Result<Self, ProfileError> {
         if let Some(relative) = configured {
             validate_relative_path(relative, "state_dir")?;
@@ -85,8 +85,8 @@ impl ProfileDirs {
                 (state_dir, state_scope)
             };
         Ok(Self {
-            sessions_dir: legacy.join("sessions"),
-            sessions_scope: root.to_path_buf(),
+            sessions_dir: state_dir.join("sessions"),
+            sessions_scope: state_scope.clone(),
             state_dir,
             state_scope,
         })
@@ -240,8 +240,8 @@ impl Profile {
             (&self.daemon_dir, &canonical_state),
             (&self.managed_skills_dir, &canonical_state),
         ] {
-            let canonical = crate::fs_security::ensure_directory_without_symlinks(directory)
-                .map_err(|error| {
+            let canonical =
+                crate::state_migration::ensure_state_directory(directory).map_err(|error| {
                     ProfileError::Invalid(format!(
                         "profile {} state child escapes or is unsafe: {} ({error})",
                         self.id,
