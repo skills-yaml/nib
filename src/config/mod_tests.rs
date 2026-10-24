@@ -76,6 +76,7 @@ fn toml_roundtrip_preserves_llm_config() {
                 base_url: None,
                 api: Some(LlmApiMode::Responses),
                 reasoning_effort: Some(ReasoningEffort::Medium),
+                prompt_cache: None,
             },
         )]),
         context_length: 128_000,

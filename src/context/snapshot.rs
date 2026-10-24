@@ -788,6 +788,7 @@ mod tests {
             tools: Some(vec![
                 json!({"type":"function","function":{"name":"run_terminal"}}),
             ]),
+            reusable_system_prefix_bytes: None,
             approximate_tokens: tokens,
             raw_message_count: 4,
             raw_tool_count: 3,
@@ -836,6 +837,7 @@ mod tests {
         let payload = BoundedLlmInput {
             messages: vec![json!({"role":"user","content":"fn main() { println!(\"🙂\"); }"})],
             tools: None,
+            reusable_system_prefix_bytes: None,
             approximate_tokens: 12,
             raw_message_count: 1,
             raw_tool_count: 0,

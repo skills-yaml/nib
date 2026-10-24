@@ -1,12 +1,13 @@
 //! LLM client factory from project config.
 
 use crate::config::{
-    is_openai_compatible_provider, LlmApiMode, LlmConfig, ProviderEntry, ReasoningEffort,
+    is_openai_compatible_provider, supports_extended_prompt_cache, LlmApiMode, LlmConfig,
+    PromptCachePolicy, ProviderEntry, ReasoningEffort,
 };
 use reqwest::Url;
 use std::sync::Arc;
 
-use super::anthropic::{normalize_anthropic_endpoint, AnthropicClient};
+use super::anthropic::{normalize_anthropic_endpoint, AnthropicCacheRetention, AnthropicClient};
 use super::compatible::{MetaProvider, OpenAiProvider, OpenRouterProvider, XaiProvider};
 use super::gemini::{normalize_gemini_api_root, GeminiClient};
 use super::mock::MockLlmClient;
@@ -26,6 +27,7 @@ pub struct ProviderDiagnostics {
     pub api_mode: String,
     pub endpoint_path: String,
     pub reasoning_effort: String,
+    pub prompt_cache: String,
     pub warning: Option<String>,
 }
 
@@ -54,6 +56,7 @@ impl ProviderDiagnostics {
             format!("API mode: {}", render_value(&self.api_mode)),
             format!("Endpoint path: {}", render_value(&self.endpoint_path)),
             format!("Reasoning effort: {}", render_value(&self.reasoning_effort)),
+            format!("Prompt cache: {}", self.prompt_cache),
         ];
         if let Some(warning) = &self.warning {
             lines.push(format!("Warning: {}", render_value(warning)));
@@ -108,6 +111,7 @@ pub(crate) enum ResolvedAdapter {
     Mock,
     Anthropic {
         endpoint: String,
+        cache_retention: Option<AnthropicCacheRetention>,
     },
     Google {
         api_root: String,
@@ -281,6 +285,14 @@ fn resolve_provider(
             "LLM provider '{provider}' does not consume api or reasoning_effort"
         ));
     }
+    let prompt_cache = entry.map_or_else(PromptCachePolicy::default, |entry| {
+        entry.resolved_prompt_cache()
+    });
+    if prompt_cache == PromptCachePolicy::Extended && !supports_extended_prompt_cache(&provider) {
+        return Err(format!(
+            "LLM provider '{provider}' has no reviewed extended prompt-cache retention; use prompt_cache = 'auto' or 'off'"
+        ));
+    }
     let model = entry
         .map(|entry| entry.model.clone())
         .filter(|model| !model.trim().is_empty())
@@ -311,10 +323,60 @@ fn resolve_provider(
             api_mode: parsed.api_mode,
             endpoint_path: parsed.endpoint_path,
             reasoning_effort: reasoning_label,
+            prompt_cache: prompt_cache_label(prompt_cache, &parsed.adapter),
             warning: parsed.warning,
         },
         adapter: parsed.adapter,
     })
+}
+
+/// Describes the effective cache behavior without claiming any provider cache hit.
+fn prompt_cache_label(policy: PromptCachePolicy, adapter: &ResolvedAdapter) -> String {
+    let detail = match (policy, adapter) {
+        (PromptCachePolicy::Off, _) => "no cache controls sent",
+        (
+            _,
+            ResolvedAdapter::Anthropic {
+                cache_retention: Some(AnthropicCacheRetention::Short),
+                ..
+            },
+        ) => "cache_control breakpoints, 5m retention",
+        (
+            _,
+            ResolvedAdapter::Anthropic {
+                cache_retention: Some(AnthropicCacheRetention::Extended),
+                ..
+            },
+        ) => "cache_control breakpoints, 1h retention",
+        (_, ResolvedAdapter::Anthropic { .. }) => "controls unavailable for a custom endpoint",
+        (_, ResolvedAdapter::Mock) => "local client; no provider cache",
+        _ => "stable prefix; implicit provider caching only",
+    };
+    format!("{policy} ({detail})")
+}
+
+/// Explicit Anthropic cache controls are reviewed only for the official API;
+/// a custom Messages endpoint receives no speculative fields.
+fn anthropic_cache_retention(
+    entry: Option<&ProviderEntry>,
+    endpoint: &str,
+) -> Result<Option<AnthropicCacheRetention>, String> {
+    let official = Url::parse(endpoint)
+        .ok()
+        .is_some_and(|url| url.scheme() == "https" && url.host_str() == Some("api.anthropic.com"));
+    let policy = entry.map_or_else(
+        PromptCachePolicy::default,
+        ProviderEntry::resolved_prompt_cache,
+    );
+    match policy {
+        PromptCachePolicy::Off => Ok(None),
+        PromptCachePolicy::Auto => Ok(official.then_some(AnthropicCacheRetention::Short)),
+        PromptCachePolicy::Extended if official => Ok(Some(AnthropicCacheRetention::Extended)),
+        PromptCachePolicy::Extended => Err(
+            "LLM provider 'anthropic' prompt_cache = 'extended' requires the official Anthropic endpoint"
+                .to_string(),
+        ),
+    }
 }
 
 pub(crate) fn parse_mock_provider_config(
@@ -338,12 +400,16 @@ pub(crate) fn parse_anthropic_provider_config(
 ) -> Result<ParsedProviderConfiguration, String> {
     let configured = resolved_native_base_url(descriptor, entry)?;
     let endpoint = normalize_anthropic_endpoint(configured)?;
+    let cache_retention = anthropic_cache_retention(entry, &endpoint)?;
     let path = Url::parse(&endpoint)
         .map_err(|_| "resolved Anthropic endpoint is invalid".to_string())?
         .path()
         .to_string();
     Ok(ParsedProviderConfiguration {
-        adapter: ResolvedAdapter::Anthropic { endpoint },
+        adapter: ResolvedAdapter::Anthropic {
+            endpoint,
+            cache_retention,
+        },
         transport: ProviderTransport::AnthropicMessages,
         api_mode: "provider_native".to_string(),
         endpoint_path: path,
@@ -470,7 +536,11 @@ compatible_constructor!(construct_meta_provider, MetaProvider);
 pub(crate) fn construct_anthropic_provider(
     construction: ProviderConstruction,
 ) -> Result<Arc<dyn LlmClient>, String> {
-    let ResolvedAdapter::Anthropic { endpoint } = construction.adapter else {
+    let ResolvedAdapter::Anthropic {
+        endpoint,
+        cache_retention,
+    } = construction.adapter
+    else {
         return Err("Anthropic constructor received an incompatible resolved adapter".to_string());
     };
     if construction.http_client.is_some() {
@@ -482,7 +552,8 @@ pub(crate) fn construct_anthropic_provider(
             construction.credentials,
             construction.diagnostic_secrets,
             endpoint,
-        )?,
+        )?
+        .with_cache_retention(cache_retention),
     ))
 }
 

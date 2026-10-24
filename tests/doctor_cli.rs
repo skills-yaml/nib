@@ -153,6 +153,7 @@ fn doctor_cli_diagnoses_and_fixes_canonical_openai_chat_transport() {
             base_url: None,
             api: None,
             reasoning_effort: None,
+            prompt_cache: None,
         },
     );
     save_nib_config_full(project.path(), &mut config).expect("save config");

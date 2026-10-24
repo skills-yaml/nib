@@ -1058,6 +1058,7 @@ fn f2_context_inspection_is_read_only_during_a_pending_prompt() {
         &crate::context::budget::BoundedLlmInput {
             messages: vec![serde_json::json!({"role":"user","content":"goal"})],
             tools: None,
+            reusable_system_prefix_bytes: None,
             approximate_tokens: 88,
             raw_message_count: 1,
             raw_tool_count: 0,

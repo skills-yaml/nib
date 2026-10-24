@@ -1076,6 +1076,7 @@ mod tests {
                 base_url: None,
                 api: None,
                 reasoning_effort: None,
+                prompt_cache: None,
             },
         );
         save_nib_config_full(dir.path(), &mut config).expect("save config");
@@ -1274,6 +1275,7 @@ mod tests {
                 base_url: Some("https://api.openai.com/v1/chat/completions".to_string()),
                 api: None,
                 reasoning_effort: Some(ReasoningEffort::Medium),
+                prompt_cache: None,
             },
         );
         save_nib_config_full(dir.path(), &mut config).expect("save legacy config");

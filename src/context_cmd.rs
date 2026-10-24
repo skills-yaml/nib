@@ -114,6 +114,7 @@ mod tests {
             &nib::context::budget::BoundedLlmInput {
                 messages: vec![json!({"role":"user","content":"goal"})],
                 tools: None,
+                reusable_system_prefix_bytes: None,
                 approximate_tokens: 40,
                 raw_message_count: 1,
                 raw_tool_count: 0,

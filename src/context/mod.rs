@@ -44,11 +44,10 @@ pub struct RuntimeContextSections {
 }
 
 impl RuntimeContextSections {
+    /// Renders reusable sections first and changing task state last so the
+    /// projection keeps a stable prefix across tasks (FT-022).
     pub fn render(&self) -> String {
-        let mut context = format!(
-            "## Project Agent Guidelines\n{}\n\n## Current Task\n{}",
-            self.agents, self.task
-        );
+        let mut context = format!("## Project Agent Guidelines\n{}", self.agents);
         if !self.project_docs.is_empty() {
             context.push_str("\n\n## Project Standards and Library Documentation\n");
             for section in &self.project_docs {
@@ -67,6 +66,7 @@ impl RuntimeContextSections {
                 context.push_str(&format!("\n- {}: {}", section.label, section.content));
             }
         }
+        context.push_str(&format!("\n\n## Current Task\n{}", self.task));
         if !self.workload.is_empty() {
             context.push_str("\n\n## Workload Snapshot\n");
             for section in &self.workload {

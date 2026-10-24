@@ -648,6 +648,42 @@ impl fmt::Display for ReasoningEffort {
     }
 }
 
+/// Provider prompt-cache policy (FT-022).
+///
+/// `auto` (the default when omitted) sends reviewed cache controls with the
+/// provider's short retention; `extended` opts into longer retention where a
+/// reviewed mapping exists; `off` sends no optional cache controls. `off` cannot
+/// disable a provider's implicit caching.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PromptCachePolicy {
+    #[default]
+    Auto,
+    Extended,
+    Off,
+}
+
+impl PromptCachePolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Extended => "extended",
+            Self::Off => "off",
+        }
+    }
+}
+
+impl fmt::Display for PromptCachePolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Providers with a reviewed extended-retention cache mapping.
+pub fn supports_extended_prompt_cache(name: &str) -> bool {
+    name == "anthropic"
+}
+
 pub fn is_openai_compatible_provider(name: &str) -> bool {
     crate::llm::registry::provider_descriptor(name)
         .is_some_and(|provider| provider.is_openai_compatible())
@@ -667,11 +703,17 @@ pub struct ProviderEntry {
     pub api: Option<LlmApiMode>,
     #[serde(default)]
     pub reasoning_effort: Option<ReasoningEffort>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache: Option<PromptCachePolicy>,
 }
 
 impl ProviderEntry {
     pub fn resolved_api_mode(&self) -> LlmApiMode {
         self.api.unwrap_or_default()
+    }
+
+    pub fn resolved_prompt_cache(&self) -> PromptCachePolicy {
+        self.prompt_cache.unwrap_or_default()
     }
 }
 
@@ -860,6 +902,13 @@ impl NibConfig {
             {
                 issues.push(format!(
                     "llm.providers.{name}.api and reasoning_effort are supported only by OpenAI-compatible providers"
+                ));
+            }
+            if provider.prompt_cache == Some(PromptCachePolicy::Extended)
+                && !supports_extended_prompt_cache(name)
+            {
+                issues.push(format!(
+                    "llm.providers.{name}.prompt_cache = 'extended' is supported only by anthropic; use 'auto' or 'off'"
                 ));
             }
             if name == "mock"
@@ -1592,6 +1641,7 @@ impl LlmConfig {
                     base_url: None,
                     api: None,
                     reasoning_effort: None,
+                    prompt_cache: None,
                 },
             );
             if self.active_provider.is_none() {
@@ -1624,6 +1674,7 @@ impl LlmConfig {
                 base_url: None,
                 api: default_api,
                 reasoning_effort: None,
+                prompt_cache: None,
             });
         entry.model = model;
         if api_key.is_some() {

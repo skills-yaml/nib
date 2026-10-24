@@ -124,28 +124,48 @@ impl LlmMessageRole {
 pub struct LlmMessage {
     pub role: LlmMessageRole,
     pub content: String,
+    /// Byte length of the leading content that is stable across adjacent
+    /// requests (FT-022). Adapters with explicit cache breakpoints may place one
+    /// at this boundary; it never changes the content that is sent.
+    reusable_prefix_bytes: Option<usize>,
 }
 
 impl LlmMessage {
-    pub fn system(content: impl Into<String>) -> Self {
+    fn with_role(role: LlmMessageRole, content: String) -> Self {
         Self {
-            role: LlmMessageRole::System,
-            content: content.into(),
+            role,
+            content,
+            reusable_prefix_bytes: None,
         }
+    }
+
+    pub fn system(content: impl Into<String>) -> Self {
+        Self::with_role(LlmMessageRole::System, content.into())
     }
 
     pub fn user(content: impl Into<String>) -> Self {
-        Self {
-            role: LlmMessageRole::User,
-            content: content.into(),
-        }
+        Self::with_role(LlmMessageRole::User, content.into())
     }
 
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self {
-            role: LlmMessageRole::Assistant,
-            content: content.into(),
+        Self::with_role(LlmMessageRole::Assistant, content.into())
+    }
+
+    /// Marks the first `bytes` of content as the reusable prefix. A boundary
+    /// that is empty, covers the whole content, or splits a character is
+    /// ignored so the message remains a single block.
+    pub fn with_reusable_prefix(mut self, bytes: usize) -> Self {
+        self.reusable_prefix_bytes = Some(bytes);
+        self
+    }
+
+    /// Returns `(stable, rest)` when a valid interior reusable boundary is set.
+    pub fn split_reusable_prefix(&self) -> Option<(&str, &str)> {
+        let bytes = self.reusable_prefix_bytes?;
+        if bytes == 0 || bytes >= self.content.len() || !self.content.is_char_boundary(bytes) {
+            return None;
         }
+        Some(self.content.split_at(bytes))
     }
 
     pub fn from_openai_value(value: &Value) -> Result<Self, String> {
@@ -163,10 +183,10 @@ impl LlmMessage {
                     .to_string(),
             );
         }
-        Ok(Self {
-            role: LlmMessageRole::parse(role)?,
-            content: content.to_string(),
-        })
+        Ok(Self::with_role(
+            LlmMessageRole::parse(role)?,
+            content.to_string(),
+        ))
     }
 
     pub fn from_openai_values(values: &[Value]) -> Result<Vec<Self>, String> {
@@ -887,8 +907,10 @@ impl LlmFinishReason {
 /// Bounded, provider-neutral token accounting for one logical provider response.
 ///
 /// `input_tokens` and `output_tokens` include their optional cached and reasoning
-/// subsets respectively. The exact total is validated so callers never need to
-/// trust or reconcile provider arithmetic themselves.
+/// subsets respectively. Cache reads (`cached_input_tokens`) and cache writes
+/// (`cache_write_input_tokens`) are disjoint input subsets, never extra tokens.
+/// The exact total is validated so callers never need to trust or reconcile
+/// provider arithmetic themselves.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(try_from = "LlmUsageWire")]
 pub struct LlmUsage {
@@ -897,6 +919,8 @@ pub struct LlmUsage {
     pub total_tokens: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cached_input_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_output_tokens: Option<u64>,
 }
@@ -909,6 +933,8 @@ struct LlmUsageWire {
     total_tokens: u64,
     #[serde(default)]
     cached_input_tokens: Option<u64>,
+    #[serde(default)]
+    cache_write_input_tokens: Option<u64>,
     #[serde(default)]
     reasoning_output_tokens: Option<u64>,
 }
@@ -923,7 +949,8 @@ impl TryFrom<LlmUsageWire> for LlmUsage {
             wire.total_tokens,
             wire.cached_input_tokens,
             wire.reasoning_output_tokens,
-        )
+        )?
+        .with_cache_write_input_tokens(wire.cache_write_input_tokens)
     }
 }
 
@@ -964,8 +991,32 @@ impl LlmUsage {
             output_tokens,
             total_tokens,
             cached_input_tokens,
+            cache_write_input_tokens: None,
             reasoning_output_tokens,
         })
+    }
+
+    /// Records reported cache-write input. Writes are an input subset disjoint
+    /// from cache reads; `None` keeps the category unknown rather than zero.
+    pub fn with_cache_write_input_tokens(
+        mut self,
+        cache_write_input_tokens: Option<u64>,
+    ) -> Result<Self, String> {
+        if let Some(written) = cache_write_input_tokens {
+            let cached = self.cached_input_tokens.unwrap_or(0);
+            if written > MAX_LLM_USAGE_TOKENS
+                || cached
+                    .checked_add(written)
+                    .is_none_or(|subset| subset > self.input_tokens)
+            {
+                return Err(
+                    "LLM cache write usage must be a bounded input subset disjoint from cache reads"
+                        .to_string(),
+                );
+            }
+        }
+        self.cache_write_input_tokens = cache_write_input_tokens;
+        Ok(self)
     }
 
     /// Checked aggregation for multi-request scenarios. Optional breakdowns remain
@@ -1004,7 +1055,12 @@ impl LlmUsage {
                 other.reasoning_output_tokens,
                 "reasoning output",
             )?,
-        )
+        )?
+        .with_cache_write_input_tokens(add_optional(
+            self.cache_write_input_tokens,
+            other.cache_write_input_tokens,
+            "cache write input",
+        )?)
     }
 }
 
