@@ -134,6 +134,7 @@ api_key = "replace-or-use-OPENAI_API_KEY"
 api_keys = []
 api = "responses"              # responses | chat_completions
 reasoning_effort = "medium"    # optional: none|minimal|low|medium|high|xhigh|max
+prompt_cache = "auto"          # optional: auto (default) | extended | off
 # base_url = "https://api.openai.com/v1"
 
 [agent]
@@ -298,6 +299,33 @@ exceeding either limit stops the request.
 profile; `execution.default_profile` selects the shell sandbox profile. Boundary
 network settings apply only to sandboxed terminal processes, not LLM HTTP, web tools,
 skill installation, or MCP child-process startup.
+
+#### Prompt caching
+
+nib orders each model request so reusable content comes first: fixed instructions,
+project agent guidelines, project references, the skill catalog, and profile
+memory precede the current task, plan step, attachments, workload snapshot, and
+compressed summary. Changing only the task or step keeps that prefix identical, so
+a provider can reuse its processing; changed guidelines, references, skills,
+memory, or tools change the prefix immediately. Cached input still counts toward
+`llm.context_length`, and compaction rules are unchanged.
+
+`llm.providers.<name>.prompt_cache` controls optional cache fields:
+
+- `auto` (default when omitted): direct Anthropic requests to the official
+  endpoint carry `cache_control` breakpoints on the last tool definition, the
+  stable system prefix, and the newest user turn, with the provider's 5-minute
+  retention. OpenAI-compatible providers and Gemini receive no extra fields and
+  rely on the provider's automatic caching. A custom Anthropic `base_url` receives
+  no cache fields.
+- `extended`: Anthropic only, official endpoint only; uses 1-hour retention, which
+  has a higher cache-write charge. Other providers reject it during configuration
+  validation.
+- `off`: nib sends no optional cache fields. This cannot disable a provider's own
+  implicit caching.
+
+Provider diagnostics in `nib doctor` show the effective `Prompt cache:` mapping.
+Reported cache reads and writes are usage evidence, not proof of savings.
 
 #### OpenAI API mode
 
@@ -562,7 +590,10 @@ next-turn queue rule; `/help` remains available for immediate command discovery.
   reserve and headroom, contributions, occupancy versus cumulative provider usage,
   message and summary coverage, retained human intent, unresolved clarifications,
   selected skills, and the latest run's generation, tool, compression, and
-  repeated-question counters. Inspection is local and read-only, including while a
+  repeated-question counters. Usage lines show reported cache reads and cache
+  writes, a read ratio (cache reads divided by reported input; `n/a` when input is
+  zero or a count is unknown), and how many requests the cumulative totals cover.
+  Counts a provider did not report appear as `unknown`, never as zero. Inspection is local and read-only, including while a
   run is active or an approval/question owns the prompt (TUI: F2 then `/context`).
 - `/model` or `/model <name>` lists or selects a model.
 - `/mode [ask|accept-edits|plan|auto|policy|default]` shows or sets this session's

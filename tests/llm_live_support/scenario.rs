@@ -936,6 +936,7 @@ fn client_for_profile(
         reasoning_effort: (provider == "openai"
             && matches!(profile.transport, TransportId::ChatCompletions))
         .then_some(ReasoningEffort::None),
+        prompt_cache: None,
     };
     let llm = LlmConfig {
         active_provider: Some(provider.to_string()),

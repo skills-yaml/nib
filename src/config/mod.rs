@@ -29,8 +29,8 @@ pub use split_00::{
     grant_workspace_access, workspace_access_is_granted, McpConfig, McpServerEntry, WorkspaceConfig,
 };
 pub use split_00::{
-    is_openai_compatible_provider, ConfigPaths, LlmApiMode, LlmConfig, ProviderEntry,
-    ReasoningEffort,
+    is_openai_compatible_provider, supports_extended_prompt_cache, ConfigPaths, LlmApiMode,
+    LlmConfig, PromptCachePolicy, ProviderEntry, ReasoningEffort,
 };
 pub use split_00::{
     load_config_with_source, load_nib_config_full, load_nib_config_full_with_source, save_config,

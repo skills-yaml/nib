@@ -146,7 +146,7 @@ pub async fn generate_plan_with_context_events_bounded_scoped(
             uuid::Uuid::new_v4().simple().to_string(),
         )?,
     };
-    let typed_messages = crate::llm::LlmMessage::from_openai_values(&bounded.messages)?;
+    let typed_messages = bounded.typed_messages()?;
     let typed_tools = crate::llm::ToolDefinition::from_openai_values_opt(bounded.tools.as_deref())?;
     let request = crate::context::snapshot::apply_response_reserve(
         LlmRequest::new(&typed_messages, typed_tools.as_deref()).with_scope(scope),

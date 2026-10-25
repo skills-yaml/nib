@@ -418,6 +418,7 @@ pub(crate) async fn run_agent_loop_inner(
     let mut llm_turns = 0u32;
     let mut tool_call_count = 0usize;
     let mut messages = Vec::new();
+    let mut reusable_system_prefix: Option<usize> = None;
     let mut llm_tools: Option<Vec<Value>> = None;
     let mut response_content: Option<String> = None;
     let mut pending_response_events: Vec<StreamEvent> = Vec::new();
@@ -1128,6 +1129,7 @@ pub(crate) async fn run_agent_loop_inner(
                                     &crate::context::budget::BoundedLlmInput {
                                         messages: messages.clone(),
                                         tools: llm_tools.clone(),
+                                        reusable_system_prefix_bytes: reusable_system_prefix,
                                         approximate_tokens: estimated,
                                         raw_message_count: messages.len(),
                                         raw_tool_count: llm_tools.as_ref().map_or(0, Vec::len),
@@ -1368,6 +1370,7 @@ pub(crate) async fn run_agent_loop_inner(
                                 )
                                 .map_err(|error| error.to_string())?;
                             messages = bounded.messages;
+                            reusable_system_prefix = bounded.reusable_system_prefix_bytes;
                             llm_tools = bounded.tools;
                             transition_state(
                                 &store,
@@ -1398,7 +1401,8 @@ pub(crate) async fn run_agent_loop_inner(
                 llm_turns += 1;
                 verification_recovery = None;
                 let continued_turn = provider_continuation.is_some();
-                let typed_messages = crate::llm::LlmMessage::from_openai_values(&messages)?;
+                let typed_messages =
+                    crate::context::budget::typed_llm_messages(&messages, reusable_system_prefix)?;
                 let typed_tools =
                     crate::llm::ToolDefinition::from_openai_values_opt(llm_tools.as_deref())?;
                 let request = crate::context::snapshot::apply_response_reserve(

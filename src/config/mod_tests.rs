@@ -76,6 +76,7 @@ fn toml_roundtrip_preserves_llm_config() {
                 base_url: None,
                 api: Some(LlmApiMode::Responses),
                 reasoning_effort: Some(ReasoningEffort::Medium),
+                prompt_cache: None,
             },
         )]),
         context_length: 128_000,
@@ -1736,4 +1737,63 @@ fn execution_sandbox_levels_validate() {
     cfg.execution.provider = "hybrid".to_string();
     cfg.execution.boundaries.network = "disabled".to_string();
     assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn prompt_cache_policy_parses_defaults_to_auto_and_rejects_unreviewed_extended() {
+    let legacy: ProviderEntry = toml::from_str("model = \"claude\"\n").expect("legacy provider");
+    assert_eq!(legacy.prompt_cache, None);
+    assert_eq!(legacy.resolved_prompt_cache(), PromptCachePolicy::Auto);
+    assert!(!toml::to_string(&legacy)
+        .expect("serialize")
+        .contains("prompt_cache"));
+
+    for (value, expected) in [
+        ("auto", PromptCachePolicy::Auto),
+        ("extended", PromptCachePolicy::Extended),
+        ("off", PromptCachePolicy::Off),
+    ] {
+        let entry: ProviderEntry =
+            toml::from_str(&format!("model = \"claude\"\nprompt_cache = \"{value}\"\n"))
+                .expect("prompt cache policy");
+        assert_eq!(entry.prompt_cache, Some(expected));
+        let round_trip: ProviderEntry =
+            toml::from_str(&toml::to_string(&entry).expect("serialize")).expect("reparse");
+        assert_eq!(round_trip, entry);
+    }
+    assert!(
+        toml::from_str::<ProviderEntry>("model = \"m\"\nprompt_cache = \"forever\"\n").is_err()
+    );
+
+    let mut config = NibConfig::default();
+    config.llm.active_provider = Some("anthropic".to_string());
+    config.llm.providers.insert(
+        "anthropic".to_string(),
+        ProviderEntry {
+            model: "claude".to_string(),
+            prompt_cache: Some(PromptCachePolicy::Extended),
+            ..ProviderEntry::default()
+        },
+    );
+    config.validate().expect("anthropic extended retention");
+    config.llm.providers.insert(
+        "openai".to_string(),
+        ProviderEntry {
+            model: "gpt".to_string(),
+            prompt_cache: Some(PromptCachePolicy::Extended),
+            ..ProviderEntry::default()
+        },
+    );
+    let error = config
+        .validate()
+        .expect_err("unreviewed extended retention")
+        .to_string();
+    assert!(
+        error.contains(
+            "llm.providers.openai.prompt_cache = 'extended' is supported only by anthropic"
+        ),
+        "{error}"
+    );
+    config.llm.providers.get_mut("openai").unwrap().prompt_cache = Some(PromptCachePolicy::Off);
+    config.validate().expect("off is valid for every provider");
 }
