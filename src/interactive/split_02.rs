@@ -122,16 +122,40 @@ pub fn format_session_status(
     )?;
     let config = load_nib_config_full(project_root)
         .map_err(|error| bounded_status_value(&error.to_string()))?;
+    let escalation = crate::agent::r#loop::format_escalation_status(&config, session.as_ref());
     let posture = ToolExecutor::effective_execution_posture(
         project_root,
         config.execution,
         &config.approvals,
     );
     Ok(format!(
-        "{header}\n{status}\n{}\n{}\n{}",
+        "{header}\n{status}\n{}\n{escalation}\n{}\n{}",
         format_effective_execution_posture(&posture),
         format_verification_status(session.as_ref(), store.public_sensitive_values()),
         format_current_plan(session.as_ref(), store.public_sensitive_values()),
+    ))
+}
+
+/// `/escalate`: records a request the current or next run consumes at its next
+/// safe boundary. Escalation stays off unless a model is configured.
+pub(crate) fn request_escalation(
+    project_root: &Path,
+    store: &SessionStore,
+    session_id: &str,
+    note: Option<&str>,
+) -> Result<String, String> {
+    let config = load_nib_config_full(project_root)
+        .map_err(|error| bounded_status_value(&error.to_string()))?;
+    if !config.agent.escalation.enabled() {
+        return Ok(
+            "Escalation is off: set agent.escalation.model in the nib configuration to enable it."
+                .to_string(),
+        );
+    }
+    crate::agent::r#loop::record_user_escalation_request(store, session_id, note)?;
+    Ok(format!(
+        "Escalation requested ({}). The run asks for advice at its next safe point; a request after earlier advice becomes a one-turn takeover.",
+        crate::agent::r#loop::escalation_config_line(&config)
     ))
 }
 
@@ -1015,6 +1039,22 @@ pub(crate) fn display_stream_event_unchecked(event: StreamEvent) -> Option<Strea
         } => StreamDisplay::Status(format!(
             "[compression] {before_tokens} -> {after_tokens} tokens; summarized through message {summarized_through}"
         )),
+        StreamEvent::Escalation {
+            kind,
+            trigger,
+            model,
+            status,
+            reason,
+        } => StreamDisplay::Status(format!(
+            "[escalation] {}",
+            crate::agent::r#loop::escalation_status_text(
+                &kind,
+                &trigger,
+                &model,
+                &status,
+                reason.as_deref(),
+            )
+        )),
         StreamEvent::Reconciled { outcome } => display_reconciliation_status(&outcome),
         StreamEvent::Failure {
             failure,
@@ -1212,6 +1252,13 @@ pub fn parse_interactive_command(input: &str) -> Result<Option<InteractiveComman
             },
         },
         "compact" if arguments.is_empty() => InteractiveCommand::Compact,
+        "escalate" => InteractiveCommand::Escalate {
+            note: if arguments.is_empty() {
+                None
+            } else {
+                Some(arguments.join(" "))
+            },
+        },
         "session" if arguments.is_empty() => InteractiveCommand::Session,
         "resume" if arguments.is_empty() => InteractiveCommand::Resume,
         "new" if arguments.is_empty() => InteractiveCommand::New,
@@ -1409,6 +1456,12 @@ pub fn execute_interactive_command_in_state(
             &action,
         )?)),
         InteractiveCommand::Compact => Ok(InteractiveEffect::Compact),
+        InteractiveCommand::Escalate { note } => Ok(InteractiveEffect::Output(request_escalation(
+            project_root,
+            store,
+            session_id,
+            note.as_deref(),
+        )?)),
         InteractiveCommand::Ps => Ok(InteractiveEffect::Output(format_session_background_tasks(
             store, session_id, false,
         )?)),

@@ -341,7 +341,41 @@ pub(crate) async fn run_agent_loop_inner(
         }
     }
 
-    let tools_schema = executor.get_tools_schema().await;
+    let mut escalation = match prepare_escalation_runtime(
+        &nib_cfg,
+        &cfg,
+        &session_before_request,
+        &run_id,
+        &sensitive_values,
+    ) {
+        Ok(Some(mut runtime)) => {
+            runtime.client = Arc::new(ResourceTrackingLlm {
+                inner: runtime.client,
+                resources: resources.clone(),
+            });
+            Some(runtime)
+        }
+        Ok(None) => None,
+        Err(reason) => {
+            store
+                .record_event(
+                    session_id,
+                    "escalation_unavailable",
+                    json!({
+                        "version": ESCALATION_EVENT_VERSION,
+                        "run_id": run_id,
+                        "reason": reason,
+                    }),
+                )
+                .map_err(|error| error.to_string())?;
+            None
+        }
+    };
+    let mut takeover_turn: Option<TakeoverTurn> = None;
+    let mut tools_schema = executor.get_tools_schema().await;
+    if escalation.is_some() {
+        tools_schema.push(ask_advice_tool_schema());
+    }
     let memory = if nib_cfg.memory.enabled {
         profile.memory_store().load_result()?
     } else {
@@ -1111,6 +1145,27 @@ pub(crate) async fn run_agent_loop_inner(
                     )
                     .await?
                 } else {
+                    if let Some(escalation) = escalation.as_mut() {
+                        // A reserved takeover waits for the next provider turn, even
+                        // when steering sends the run back through this boundary.
+                        if let Some(reserved) = dispatch_pending_escalation(
+                            escalation,
+                            &store,
+                            session_id,
+                            &run_id,
+                            goal,
+                            &context_sections.agents,
+                            active_plan_id.as_deref(),
+                            &request_scope,
+                            &public_output_sensitive_values,
+                            &cfg.stream_tx,
+                            &mut provider_continuation,
+                        )
+                        .await?
+                        {
+                            takeover_turn = Some(reserved);
+                        }
+                    }
                     let skip_rebuild = if let Some(continuation) = provider_continuation.as_ref() {
                         let estimated =
                             approximate_llm_input_tokens(&messages, llm_tools.as_deref());
@@ -1411,10 +1466,27 @@ pub(crate) async fn run_agent_loop_inner(
                         .with_continuation(provider_continuation.take()),
                     nib_cfg.llm.context_length,
                 );
-                let stream_result = llm.stream(request).await;
+                // A takeover turn runs on the escalation model with a fresh request.
+                let turn_takeover = takeover_turn.take();
+                let turn_llm = match (turn_takeover, escalation.as_ref()) {
+                    (Some(_), Some(escalation)) => escalation.client.clone(),
+                    _ => llm.clone(),
+                };
+                let stream_result = turn_llm.stream(request).await;
                 let stream = match stream_result {
                     Ok(stream) => stream,
                     Err(error) => {
+                        finish_model_turn_escalation(
+                            &mut escalation,
+                            turn_takeover,
+                            false,
+                            None,
+                            &store,
+                            session_id,
+                            &run_id,
+                            &cfg.stream_tx,
+                        )
+                        .await?;
                         if continued_turn {
                             record_provider_continuation_lifecycle(
                                 &store,
@@ -1440,18 +1512,34 @@ pub(crate) async fn run_agent_loop_inner(
                 };
                 match finish_private_provider_stream(stream, &public_output_sensitive_values).await
                 {
-                    Ok((response, pending_stream_events)) => {
+                    Ok((mut response, pending_stream_events)) => {
+                        let mut usage_details = crate::context::snapshot::usage_event_details(
+                            &run_id,
+                            llm_turns as u64,
+                            response.usage.as_ref(),
+                        );
+                        if turn_takeover.is_some() {
+                            usage_details["model_role"] = json!("escalation");
+                        }
                         store
-                            .record_event(
-                                session_id,
-                                "context_usage",
-                                crate::context::snapshot::usage_event_details(
-                                    &run_id,
-                                    llm_turns as u64,
-                                    response.usage.as_ref(),
-                                ),
-                            )
+                            .record_event(session_id, "context_usage", usage_details)
                             .map_err(|error| error.to_string())?;
+                        finish_model_turn_escalation(
+                            &mut escalation,
+                            turn_takeover,
+                            response.terminal_status != LlmTerminalStatus::Refused,
+                            response.usage.as_ref(),
+                            &store,
+                            session_id,
+                            &run_id,
+                            &cfg.stream_tx,
+                        )
+                        .await?;
+                        if turn_takeover.is_some() {
+                            // Continuation state is bound to the escalation model; the
+                            // worker's next request is rebuilt from the session.
+                            response.continuation = None;
+                        }
                         if continued_turn {
                             record_provider_continuation_lifecycle(
                                 &store,
@@ -1509,6 +1597,17 @@ pub(crate) async fn run_agent_loop_inner(
                         }
                     }
                     Err(error) => {
+                        finish_model_turn_escalation(
+                            &mut escalation,
+                            turn_takeover,
+                            false,
+                            None,
+                            &store,
+                            session_id,
+                            &run_id,
+                            &cfg.stream_tx,
+                        )
+                        .await?;
                         if continued_turn {
                             record_provider_continuation_lifecycle(
                                 &store,
@@ -1613,6 +1712,15 @@ pub(crate) async fn run_agent_loop_inner(
                         })
                         .map_err(|error| error.to_string())?;
                     if !unresolved_verifications.is_empty() {
+                        observe_escalation_outcome(
+                            &mut escalation,
+                            false,
+                            &store,
+                            session_id,
+                            &run_id,
+                            &cfg.stream_tx,
+                        )
+                        .await?;
                         response_content = None;
                         pending_response_events.clear();
                         reconciliation_reason =

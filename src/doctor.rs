@@ -189,6 +189,18 @@ fn run_doctor_inner(project: &Path, fix: bool, confirm_no_legacy_processes: bool
                 "  Agent max turns: {} (tool enforcement: {})",
                 config.agent.max_turns, config.agent.tool_use_enforcement
             );
+            let escalation = &config.agent.escalation;
+            match escalation.model.as_deref() {
+                Some(model) if escalation.enabled() => println!(
+                    "  Escalation: {}/{model}, up to {} per run",
+                    escalation
+                        .provider
+                        .clone()
+                        .unwrap_or_else(|| config.llm.get_active_provider()),
+                    escalation.max_per_run
+                ),
+                _ => println!("  Escalation: off"),
+            }
             println!(
                 "  Terminal: {} (timeout: {}s)",
                 config.terminal.backend, config.terminal.timeout

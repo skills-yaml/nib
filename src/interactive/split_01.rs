@@ -1017,6 +1017,23 @@ pub fn apply_stream_event(
             )
             .folded(),
         ),
+        StreamEvent::Escalation {
+            kind,
+            trigger,
+            model,
+            status,
+            reason,
+        } => activities.push(ActivityEntry::new(
+            ActivityKind::System,
+            "escalation".to_string(),
+            crate::agent::r#loop::escalation_status_text(
+                &kind,
+                &trigger,
+                &model,
+                &status,
+                reason.as_deref(),
+            ),
+        )),
         StreamEvent::Reconciled { outcome } if outcome == "step_completed" => {}
         StreamEvent::Reconciled { outcome } if outcome == "verification_recovery" => {}
         StreamEvent::Reconciled { outcome } if outcome == "instruction_context_missing" => {

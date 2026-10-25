@@ -798,6 +798,7 @@ pub(crate) fn launch_subagent_task(
                 max_steps,
                 auto_approve: false,
                 approval_handler: Some(Arc::new(NonInteractiveSubagentApproval)),
+                escalation: false,
                 ..Default::default()
             };
             let outcome =

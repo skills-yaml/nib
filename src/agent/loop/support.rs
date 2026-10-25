@@ -1574,6 +1574,10 @@ pub struct AgentLoopConfig {
     /// Sandbox level for this run (`nib run --sandbox`), over
     /// `execution.sandbox`. Project instructions still apply on top.
     pub sandbox: Option<crate::sandbox::SandboxLevel>,
+    /// Permit configured model escalation (FT-021) for this run. Delegated
+    /// children run without it, so they cannot spend or reset the parent's
+    /// allowance.
+    pub escalation: bool,
 }
 
 impl Default for AgentLoopConfig {
@@ -1596,6 +1600,7 @@ impl Default for AgentLoopConfig {
             required_worktree: None,
             permission_mode: None,
             sandbox: None,
+            escalation: true,
         }
     }
 }

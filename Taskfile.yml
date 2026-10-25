@@ -181,6 +181,12 @@ tasks:
       - '{{.FOCUSED_TEST}} --lib context::budget::tests:: -- --test-threads=1'
       - '{{.FOCUSED_TEST}} --lib context::snapshot::tests:: -- --test-threads=1'
 
+  test:model-escalation:
+    desc: Run offline FT-021 model escalation tests with scripted providers
+    deps: [test:focused-runner]
+    cmds:
+      - '{{.FOCUSED_TEST}} --lib agent::r#loop::escalation::tests:: -- --test-threads=1'
+
   test:durable:
     desc: Run durable background task and scheduled worker integration tests
     deps: [test:focused-runner]
