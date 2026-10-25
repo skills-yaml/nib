@@ -158,11 +158,6 @@ impl Plan {
         }
     }
 
-    pub fn reject(&mut self, reason: impl Into<String>) {
-        self.approved = false;
-        self.outcome = Some(reason.into());
-    }
-
     pub fn record_tool_outcome(&mut self, success: bool, outcome: impl Into<String>) {
         let Some(step) = self.steps.get_mut(self.current_step_index) else {
             return;
@@ -530,14 +525,6 @@ impl SessionWorkspace {
 
     pub fn is_worktree(&self) -> bool {
         self.mode == WorkspaceMode::Worktree
-    }
-
-    /// `in_place` or `worktree`, as recorded in run events.
-    pub fn label(&self) -> &'static str {
-        match self.mode {
-            WorkspaceMode::InPlace => "in_place",
-            WorkspaceMode::Worktree => "worktree",
-        }
     }
 }
 

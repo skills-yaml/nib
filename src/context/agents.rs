@@ -640,48 +640,11 @@ fn patch_scopes(project_root: &Path, arguments: &Value) -> Result<Vec<PathBuf>, 
     Ok(paths)
 }
 
-pub fn find_agents_md(start_path: &Path) -> Option<PathBuf> {
-    let mut current = if start_path.is_file() {
-        start_path.parent()?.to_path_buf()
-    } else {
-        start_path.to_path_buf()
-    };
-    loop {
-        for filename in LOCAL_FILENAMES.iter().chain(BASE_FILENAMES) {
-            let candidate = current.join(filename);
-            let metadata = fs::symlink_metadata(&candidate).ok();
-            if metadata.is_some_and(|metadata| {
-                metadata.is_file() && !crate::fs_security::metadata_is_link_or_reparse(&metadata)
-            }) {
-                return Some(candidate);
-            }
-        }
-        if !current.pop() {
-            break;
-        }
-    }
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join("AGENTS.md"))
-        .filter(|path| path.is_file())
-}
-
 pub fn load_agents_md(project_path: &Path) -> String {
     InstructionResolver::new(project_path)
         .and_then(|mut resolver| resolver.resolve_for_scopes([project_path]))
         .map(|instructions| instructions.render())
         .unwrap_or_else(|error| format!("# Error loading project instructions: {error}"))
-}
-
-pub fn format_context_for_prompt(project_path: &Path, task: Option<&str>) -> String {
-    let mut parts = vec![format!(
-        "## Project Agent Guidelines\n{}",
-        load_agents_md(project_path)
-    )];
-    if let Some(task) = task {
-        parts.push(format!("## Current Task\n{task}"));
-    }
-    parts.join("\n\n")
 }
 
 #[cfg(test)]

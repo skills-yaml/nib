@@ -73,9 +73,6 @@ pub(crate) fn run_config_read_hook(path: &Path) -> Result<(), ConfigError> {
     hook.map_or(Ok(()), |hook| hook(path).map_err(config_state_error))
 }
 
-/// Legacy alias used by CLI modules during the Rust migration.
-pub type LLMConfigFile = LlmConfig;
-
 pub(crate) const MAX_MCP_CONFIGURED_SERVERS: usize = 32;
 pub(crate) const MAX_MCP_SERVER_NAME_BYTES: usize = 64;
 pub(crate) const MAX_MCP_REQUEST_TIMEOUT_SECS: u64 = 3_600;
@@ -1591,29 +1588,6 @@ impl LlmConfig {
             }
         }
         models
-    }
-
-    pub fn update_model_for_active(&mut self, new_model: String) {
-        let active = self.get_active_provider();
-        if let Some(entry) = self.providers.get_mut(&active) {
-            entry.model = new_model;
-        } else if active == "mock" {
-            self.providers.insert(
-                "mock".to_string(),
-                ProviderEntry {
-                    model: new_model,
-                    models: None,
-                    api_key: None,
-                    api_keys: Vec::new(),
-                    base_url: None,
-                    api: None,
-                    reasoning_effort: None,
-                },
-            );
-            if self.active_provider.is_none() {
-                self.active_provider = Some("mock".to_string());
-            }
-        }
     }
 
     pub fn add_or_update_provider(

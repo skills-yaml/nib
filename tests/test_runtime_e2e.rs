@@ -6,10 +6,9 @@ use nib::config::{
     save_nib_config_full, DaemonsConfig, ExecutionConfig, LlmConfig, McpServerEntry, NibConfig,
     ProfileConfig, ProfilesConfig, ProviderEntry,
 };
-use nib::context::assemble_context;
 use nib::context::compression::{maybe_compress_session, CompressionReport};
-use nib::context::format_context_for_prompt;
-use nib::context::skills::load_relevant_skills;
+use nib::context::skills::render_skill_content;
+use nib::context::{assemble_profile_context, load_agents_md, select_profile_skills};
 use nib::integrations::mcp::McpManager;
 use nib::llm::{
     LlmClient, LlmErrorClass, LlmErrorPhase, LlmRequest, LlmResponse, RetryDisposition, StreamEvent,
@@ -3602,11 +3601,13 @@ Observe the approved plan and verify each tool result.
         .expect("user memory");
 
     let goal = "explore the runtime profile sequence";
-    let agents_context = format_context_for_prompt(root.path(), Some(goal));
-    assert!(agents_context.contains("Runtime fixture rule"));
-    let skill_context = load_relevant_skills(root.path(), Some(goal));
-    assert!(skill_context.contains("runtime-proof"));
-    assert!(skill_context.contains("verify each tool result"));
+    // The run selects the profile's active skill through the current catalog path.
+    assert!(load_agents_md(root.path()).contains("Runtime fixture rule"));
+    let selected = select_profile_skills(root.path(), &config, profile, goal)
+        .expect("profile skill selection");
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].frontmatter.name, "runtime-proof");
+    assert!(render_skill_content(&selected[0]).contains("verify each tool result"));
 
     let store = SessionStore::for_project(root.path()).expect("profile session store");
     let session = store.create_session_with_id("sequence-session");
@@ -4427,7 +4428,10 @@ Use bounded reads and report the concrete artifact path.
 "#,
     )
     .expect("skill fixture");
-    let memory = MemoryStore::new(root.path());
+    // Runtime context reads the default profile's memory and explicitly invoked skills.
+    let profiles =
+        ProfileRegistry::load(root.path(), &NibConfig::default().profiles).expect("profiles");
+    let memory = profiles.default_profile().memory_store();
     memory
         .set_environment("test_gate", "task test")
         .expect("environment memory");
@@ -4435,15 +4439,18 @@ Use bounded reads and report the concrete artifact path.
         .set_user("answer_style", "concise")
         .expect("user memory");
 
-    let context = assemble_context(root.path(), Some("inspect the Rust context"));
+    let context = assemble_profile_context(
+        root.path(),
+        Some("inspect the Rust context with $context-proof"),
+    )
+    .expect("profile context");
     for expected in [
         "Context fixture rule",
         "Project Standards and Library Documentation",
         "preserve library boundaries",
-        "Environment Facts",
-        "test_gate: task test",
-        "User Preferences",
-        "answer_style: concise",
+        "Profile Memory",
+        "environment.test_gate: task test",
+        "user.answer_style: concise",
         "Skill: context-proof",
         "Use bounded reads",
     ] {

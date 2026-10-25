@@ -1292,14 +1292,6 @@ impl SessionStore {
 
     /// Atomically reloads and conditionally deletes a session while holding the
     /// same process and file locks used by every session mutation.
-    pub fn delete_if(
-        &self,
-        id: &str,
-        should_delete: impl FnOnce(&Session, &SessionRecordMetadata) -> bool,
-    ) -> Result<SessionDeleteOutcome, SessionError> {
-        self.delete_if_with_commit_check(id, should_delete, || Ok(()))
-    }
-
     pub(crate) fn delete_if_with_commit_check(
         &self,
         id: &str,

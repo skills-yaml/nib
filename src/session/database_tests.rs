@@ -317,13 +317,17 @@ fn deleting_a_database_session_removes_its_rows() {
     store.append_message(&session.id, "user", "bye");
 
     assert_eq!(
-        store.delete_if(&session.id, |_, _| false).expect("retain"),
+        store
+            .delete_if_with_commit_check(&session.id, |_, _| false, || Ok(()))
+            .expect("retain"),
         SessionDeleteOutcome::Retained
     );
     let outcome = store
-        .delete_if(&session.id, |_, metadata| {
-            metadata.modified().is_ok() && !metadata.is_empty()
-        })
+        .delete_if_with_commit_check(
+            &session.id,
+            |_, metadata| metadata.modified().is_ok() && !metadata.is_empty(),
+            || Ok(()),
+        )
         .expect("delete");
     assert_eq!(outcome, SessionDeleteOutcome::Deleted);
     assert!(store.load_result(&session.id).expect("load").is_none());
@@ -336,7 +340,9 @@ fn deleting_a_database_session_removes_its_rows() {
         .expect("orphans");
     assert_eq!(orphans, 0);
     assert_eq!(
-        store.delete_if(&session.id, |_, _| true).expect("missing"),
+        store
+            .delete_if_with_commit_check(&session.id, |_, _| true, || Ok(()))
+            .expect("missing"),
         SessionDeleteOutcome::Missing
     );
 }

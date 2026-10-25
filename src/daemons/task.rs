@@ -98,10 +98,6 @@ impl DaemonAuditLog {
         Self { path }
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
     pub fn append(&self, record: &DaemonAuditRecord) -> Result<(), String> {
         let lock_path = audit_lock_path(&self.path);
         crate::daemons::state::with_file_lock(&lock_path, |directory| {
@@ -696,10 +692,6 @@ impl TaskManager {
 
     pub fn register_subagent(&self, id: String) {
         let _ = self.register_task(id, "subagent");
-    }
-
-    pub fn mark_completed(&self, id: &str) {
-        self.complete(id, None);
     }
 
     pub fn complete(&self, id: &str, result: Option<Value>) {

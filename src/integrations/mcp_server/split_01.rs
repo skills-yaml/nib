@@ -232,20 +232,19 @@ pub(crate) async fn call_tool(
     if let Some(cancellation) = cancellation {
         executor = executor.with_cancellation(cancellation.clone());
     }
-    let mut result = SessionStore::with_lock_policy(
-        MCP_CANCELLATION_AUDIT_LOCK_TIMEOUT,
-        executor.execute(
-            ToolCall {
-                invocation_id: crate::tools::ToolInvocationId::new(),
-                tool_name: executor_name,
-                arguments,
-                session_id: Some(audit_session.id.clone()),
-                project_root: Some(runtime.project_root),
-            },
-            Some(&audit_session.id),
-        ),
-    )
-    .await;
+    // Keep the large tool-execution future off the request thread's stack (T051).
+    let execution = Box::pin(executor.execute(
+        ToolCall {
+            invocation_id: crate::tools::ToolInvocationId::new(),
+            tool_name: executor_name,
+            arguments,
+            session_id: Some(audit_session.id.clone()),
+            project_root: Some(runtime.project_root),
+        },
+        Some(&audit_session.id),
+    ));
+    let mut result =
+        SessionStore::with_lock_policy(MCP_CANCELLATION_AUDIT_LOCK_TIMEOUT, execution).await;
 
     result.tool_name = requested_name.clone();
     if requested_name == "nib_get_status" && result.success {

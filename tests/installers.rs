@@ -1,3 +1,6 @@
+#[path = "support/focused_test.rs"]
+mod focused_test;
+
 use std::fs;
 use std::path::PathBuf;
 
@@ -222,9 +225,151 @@ fn task_contract_enforces_strict_clippy_on_every_local_target_and_feature() {
     );
 }
 
+fn task_names(taskfile: &str) -> Vec<&str> {
+    let tasks = taskfile
+        .split_once("\ntasks:\n")
+        .expect("Taskfile tasks map")
+        .1;
+    tasks
+        .lines()
+        .filter_map(|line| line.strip_prefix("  ")?.strip_suffix(':'))
+        .filter(|name| !name.starts_with([' ', '#']))
+        .collect()
+}
+
+#[test]
+fn task_contract_focused_test_commands_fail_on_empty_selections() {
+    let taskfile = read_repository_text("Taskfile.yml");
+    assert!(taskfile
+        .contains("\nvars:\n  # Focused test commands run through this guard so a selection that matches zero\n"));
+    assert!(taskfile.contains("  FOCUSED_TEST: ./target/debug/examples/focused_test{{exeExt}}\n"));
+    let runner = task_section(&taskfile, "test:focused-runner");
+    assert!(runner.contains("internal: true"));
+    assert!(runner.contains("run: once"));
+    assert!(runner.contains("- cargo build --quiet --example focused_test"));
+
+    let mut focused = Vec::new();
+    for name in task_names(&taskfile) {
+        let section = task_section(&taskfile, name);
+        // Only the full suite and the no-run build may invoke cargo test directly;
+        // every selection goes through the zero-test guard.
+        let direct = section.matches("cargo test").count();
+        let allowed = section.matches("cargo test -- --test-threads=1").count()
+            + section.matches("cargo test --lib --no-run").count();
+        assert_eq!(
+            direct, allowed,
+            "{name} runs cargo test without the focused guard"
+        );
+        if name == "test" {
+            assert!(!section.contains("{{.FOCUSED_TEST}}"));
+        }
+        if section.contains("{{.FOCUSED_TEST}}") {
+            assert!(
+                section.contains("    deps: [test:focused-runner]\n"),
+                "{name} runs the focused guard without building it"
+            );
+            focused.push(name);
+        }
+    }
+    for required in [
+        "test:tui-cache",
+        "test:tui-shutdown",
+        "test:mcp-stack:small-stack",
+        "test:interactive",
+        "test:delegation",
+        "test:task-contract",
+    ] {
+        assert!(
+            focused.contains(&required),
+            "{required} bypasses the focused guard"
+        );
+    }
+
+    // The three selectors whose tests moved into submodules (T087).
+    for (task, selector) in [
+        ("test:tui-cache", "--lib tui::tests::render::session_display_cache_ "),
+        ("test:tui-shutdown", "--lib tui::tests::session::tui_shutdown_ "),
+        (
+            "test:mcp-stack:small-stack",
+            "--lib\n        integrations::mcp_server::tests::test_part_1::nib_run_provider_failure_reaches_mcp_status_as_typed_llm_error\n",
+        ),
+    ] {
+        assert!(
+            task_section(&taskfile, task).contains(selector),
+            "{task} lost its current selector"
+        );
+    }
+    let stack = task_section(&taskfile, "test:mcp-stack");
+    let build = stack
+        .find("- cargo test --lib --no-run")
+        .expect("MCP test build");
+    let guard = stack
+        .find("- task: test:focused-runner")
+        .expect("MCP guard build");
+    let small = stack
+        .find("- task: test:mcp-stack:small-stack")
+        .expect("small stack run");
+    assert!(
+        build < small && guard < small,
+        "both builds precede the stack limit"
+    );
+    assert!(
+        task_section(&taskfile, "test:mcp-stack:small-stack").contains("RUST_MIN_STACK: '1048576'")
+    );
+}
+
+#[test]
+fn task_contract_focused_guard_counts_executed_tests() {
+    use focused_test::{executed_tests, selection_outcome};
+
+    assert_eq!(
+        executed_tests(
+            "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1565 filtered out; finished in 0.17s"
+        ),
+        Some(2)
+    );
+    assert_eq!(
+        executed_tests("test result: FAILED. 1 passed; 2 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.00s\r\n"),
+        Some(3)
+    );
+    // A stale filter: everything filtered out, nothing executed.
+    assert_eq!(
+        executed_tests(
+            "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1567 filtered out; finished in 0.00s"
+        ),
+        Some(0)
+    );
+    // Ignored tests did not run.
+    assert_eq!(
+        executed_tests("test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s"),
+        Some(0)
+    );
+    for unrelated in [
+        "",
+        "running 2 tests",
+        "test tui::tests::render::session_display_cache_waits ... ok",
+        "test result: ok.",
+        "test result: ok. many passed",
+        "prefix test result: ok. 2 passed; 0 failed",
+    ] {
+        assert_eq!(executed_tests(unrelated), None, "{unrelated:?}");
+    }
+
+    assert_eq!(selection_outcome(true, 1), Ok(()));
+    assert!(selection_outcome(true, 0)
+        .expect_err("an empty selection fails")
+        .contains("zero tests"));
+    assert!(selection_outcome(false, 0)
+        .expect_err("a failed command fails")
+        .contains("command failed"));
+    assert!(selection_outcome(false, 4)
+        .expect_err("test failures keep failing")
+        .contains("command failed"));
+}
+
 #[test]
 fn delegation_task_pins_hosted_stabilization_fixtures() {
-    const TESTS: [(&str, &str); 4] = [
+    const TESTS: [(&str, &str); 3] = [
         (
             "src/tools/delegation/test_part_0.rs",
             "tools::delegation::tests::test_part_0::sync_and_cancellable_record_failures_rollback_exact_fallback_audit_preparation",
@@ -237,15 +382,16 @@ fn delegation_task_pins_hosted_stabilization_fixtures() {
             "src/tools/delegation/test_part_0.rs",
             "tools::delegation::tests::test_part_0::spawn_intent_and_session_atomic_phase_crashes_reconcile_exactly",
         ),
-        (
-            "src/integrations/mcp_server/test_part_1.rs",
-            "integrations::mcp_server::tests::test_part_1::mcp_subagent_flow_accepts_a_dos_short_project_root",
-        ),
     ];
+    // The DOS short-name fixture is Windows-only, so its command is platform-gated.
+    const WINDOWS_TEST: (&str, &str) = (
+        "src/integrations/mcp_server/test_part_1.rs",
+        "integrations::mcp_server::tests::test_part_1::mcp_subagent_flow_accepts_a_dos_short_project_root",
+    );
     let taskfile = read_repository_text("Taskfile.yml");
     let delegation = task_section(&taskfile, "test:delegation");
 
-    for (source_path, selector) in TESTS {
+    for (source_path, selector) in TESTS.into_iter().chain([WINDOWS_TEST]) {
         let source = read_repository_text(source_path);
         let test_name = selector
             .rsplit("::")
@@ -256,10 +402,19 @@ fn delegation_task_pins_hosted_stabilization_fixtures() {
             1,
             "the focused hosted fixture must remain uniquely named: {test_name}"
         );
+        let (prefix, indent, suffix) = if selector == WINDOWS_TEST.1 {
+            (
+                "- cmd: >-\n          ",
+                "          ",
+                "\n        platforms: [windows]",
+            )
+        } else {
+            ("- >-\n        ", "        ", "")
+        };
         assert_eq!(
             delegation
                 .matches(&format!(
-                    "cargo test --lib\n        {selector}\n        -- --exact --test-threads=1"
+                    "{prefix}{{{{.FOCUSED_TEST}}}} --lib\n{indent}{selector}\n{indent}-- --exact --test-threads=1{suffix}"
                 ))
                 .count(),
             1,
@@ -343,6 +498,42 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
     assert!(!script.contains("realpath"));
     assert!(!script.contains("curl "));
     assert!(!script.contains("wget "));
+
+    // The editor cases wait on observable signals under one deadline inside the
+    // 40-second PTY bound, and quit the TUI when a signal is missed (T087).
+    let editor_cases = script
+        .split_once("tui_editor_success_input() {")
+        .and_then(|(_, rest)| rest.split_once("printf -v editor_success_environment"))
+        .expect("editor smoke cases")
+        .0;
+    assert!(script.contains("editor_case_seconds=25\n"));
+    assert!(script.contains("run_bounded_command 40 \"$output\" script -q -e -c"));
+    assert!(
+        !editor_cases.contains("sleep 0."),
+        "editor cases use fixed delays"
+    );
+    assert_eq!(
+        editor_cases
+            .matches("local deadline=$((SECONDS + editor_case_seconds))")
+            .count(),
+        2
+    );
+    assert_eq!(
+        editor_cases
+            .matches("pty_output_occurs \"$output\" \"$bracketed_paste_enable\" 2")
+            .count(),
+        2,
+        "both editor cases wait for the TUI to resume after the editor"
+    );
+    assert_eq!(
+        editor_cases
+            .matches("wait_until_deadline \"$deadline\"")
+            .count(),
+        editor_cases
+            .matches("|| abandon_tui_input || return 1")
+            .count(),
+        "every bounded editor wait quits the TUI when its signal is missed"
+    );
 
     for contract in [
         "Invoke-WindowsPseudoTerminal",
@@ -483,7 +674,7 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
     );
     assert_eq!(
         task_section(&taskfile, "test:interactive")
-            .matches("cargo test --lib exact_run_steering -- --test-threads=1")
+            .matches("'{{.FOCUSED_TEST}} --lib exact_run_steering -- --test-threads=1'")
             .count(),
         1,
         "the focused interactive task must keep selecting exact-run steering serially"

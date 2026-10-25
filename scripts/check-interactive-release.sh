@@ -791,31 +791,81 @@ exit 7
 EDITOR
 chmod 700 "$fixture/editor-success.sh" "$fixture/editor-failure.sh"
 
+# Editor cases wait on observable signals under one bounded deadline, well inside
+# the 40-second PTY limit. The TUI enables bracketed paste once raw input is live
+# and again when it resumes after the editor exits, so the number of enable
+# sequences tracks the editor round trip. A missed signal quits the TUI so the
+# case fails with its diagnostic instead of running into the PTY kill.
+editor_case_seconds=25
+
+pty_output_occurs() {
+  local output=$1
+  local expected=$2
+  local count=$3
+  [ -f "$output" ] &&
+    [ "$(grep -a -F -o -- "$expected" "$output" 2>/dev/null | wc -l | tr -d ' ')" -ge "$count" ]
+}
+
+goal_session_exists() {
+  local goal=$1
+  local candidate
+  export_sessions
+  for candidate in "$session_directory"/*.json; do
+    if [ -f "$candidate" ] && grep -Fq "\"content\": \"$goal\"" "$candidate" 2>/dev/null; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+wait_until_deadline() {
+  local deadline=$1
+  local description=$2
+  shift 2
+  until "$@"; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      printf 'PTY case %s timed out waiting for %s\n' "$current_case" "$description" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
+}
+
+abandon_tui_input() {
+  printf '\021\021'
+  return 1
+}
+
 tui_editor_success_input() {
-  sleep 0.8
+  local output="$fixture/tui-editor-success.txt"
+  local deadline=$((SECONDS + editor_case_seconds))
+  wait_until_deadline "$deadline" 'TUI input readiness' \
+    pty_output_occurs "$output" "$bracketed_paste_enable" 1 || abandon_tui_input || return 1
   printf '\033[200~original editor draft\033[201~\007'
-  wait_for_pty_output "$fixture/tui-editor-success.txt" 'T084_EDITOR_SUCCESS_DRAFT' || return 1
+  wait_until_deadline "$deadline" 'TUI resumption after the editor' \
+    pty_output_occurs "$output" "$bracketed_paste_enable" 2 || abandon_tui_input || return 1
+  wait_until_deadline "$deadline" 'the edited draft' \
+    pty_output_occurs "$output" 'T084_EDITOR_SUCCESS_DRAFT' 1 || abandon_tui_input || return 1
   printf '\r'
-  wait_for_goal_session 'T084_EDITOR_SUCCESS_DRAFT' >/dev/null || return 1
+  wait_until_deadline "$deadline" 'the edited goal session' \
+    goal_session_exists 'T084_EDITOR_SUCCESS_DRAFT' || abandon_tui_input || return 1
   printf '\021\021'
 }
 
 tui_editor_failure_input() {
-  sleep 0.8
+  local output="$fixture/tui-editor-failure.txt"
+  local deadline=$((SECONDS + editor_case_seconds))
+  wait_until_deadline "$deadline" 'TUI input readiness' \
+    pty_output_occurs "$output" "$bracketed_paste_enable" 1 || abandon_tui_input || return 1
   printf '\033[200~T084_EDITOR_FAILURE_DRAFT\033[201~\007'
-  local attempts=0
-  while [ ! -f "$fixture/editor-failure-observed" ] && [ "$attempts" -lt 100 ]; do
-    attempts=$((attempts + 1))
-    sleep 0.1
-  done
-  if [ ! -f "$fixture/editor-failure-observed" ]; then
-    printf '%s\n' 'external editor failure fixture was not invoked' >&2
-    return 1
-  fi
-  # The editor has exited; input is consumed after terminal restoration.
-  sleep 0.1
+  wait_until_deadline "$deadline" 'the failing external editor' \
+    test -f "$fixture/editor-failure-observed" || abandon_tui_input || return 1
+  # Input is consumed only after the TUI restores raw input following the editor.
+  wait_until_deadline "$deadline" 'TUI resumption after the editor' \
+    pty_output_occurs "$output" "$bracketed_paste_enable" 2 || abandon_tui_input || return 1
   printf '\r'
-  wait_for_goal_session 'T084_EDITOR_FAILURE_DRAFT' >/dev/null || return 1
+  wait_until_deadline "$deadline" 'the preserved draft session' \
+    goal_session_exists 'T084_EDITOR_FAILURE_DRAFT' || abandon_tui_input || return 1
   printf '\021\021'
 }
 
