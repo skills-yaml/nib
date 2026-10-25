@@ -115,6 +115,14 @@ tasks:
     cmds:
       - cargo build --quiet --example focused_test
 
+  test:store-reresolve:
+    desc: Re-resolve a held session or task store after state migration
+    deps: [test:focused-runner]
+    cmds:
+      - >-
+        {{.FOCUSED_TEST}} --lib state_migration::store_relocation_tests
+        -- --test-threads=1
+
   test:llm-failure-cli:
     desc: Verify local HTTP failure and plain-chat recovery fixtures
     deps: [test:focused-runner]

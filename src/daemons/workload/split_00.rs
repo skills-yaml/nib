@@ -416,6 +416,15 @@ impl DurableTaskStore {
         &self.daemon_dir
     }
 
+    /// Audit log on the daemon directory this store holds, including after
+    /// that directory was renamed into the user home.
+    pub(crate) fn audit_log(&self) -> Result<DaemonAuditLog, String> {
+        Ok(DaemonAuditLog::at_path(
+            self.daemon_directory
+                .relocated_file(self.daemon_dir.join("audit.jsonl"))?,
+        ))
+    }
+
     pub(crate) fn same_store(&self, other: &Self) -> bool {
         self.tasks_directory.same_identity(&other.tasks_directory)
     }
@@ -433,7 +442,7 @@ impl DurableTaskStore {
         .chars()
         .take(MAX_COMPENSATION_AUDIT_DETAIL_CHARS)
         .collect();
-        DaemonAuditLog::at_path(self.daemon_dir.join("audit.jsonl")).append(&DaemonAuditRecord {
+        self.audit_log()?.append(&DaemonAuditRecord {
             timestamp: Utc::now(),
             daemon: "task".to_string(),
             action: action.to_string(),
@@ -972,9 +981,10 @@ impl DurableTaskStore {
             }
             DurableJob::Terminal { .. } => None,
         };
+        let audit = self.audit_log()?;
         let delivery_error = reconcile_expired_job(
             &opened.task.job,
-            &self.daemon_dir,
+            &audit,
             task_id,
             &opened.task.record.execution_id,
             occurrence,
@@ -1062,7 +1072,7 @@ impl DurableTaskStore {
             ));
         }
 
-        let audit = DaemonAuditLog::at_path(self.daemon_dir.join("audit.jsonl"));
+        let audit = self.audit_log()?;
         let detail = format!(
             "task_id={id}; status={}; updated_at={}; reason=durable_record_capacity",
             opened.task.record.status, opened.task.record.updated_at
@@ -1444,17 +1454,27 @@ impl DurableTaskStore {
     }
 
     pub(crate) fn acquire_task_lock(&self, id: &str) -> Result<TaskLock, String> {
-        let lock = TaskLock::acquire(self.lock_path(id), self.lock_anchor_path(id))?;
         self.tasks_directory.verify_visible()?;
         self.daemon_directory.verify_visible()?;
+        let lock = TaskLock::acquire(
+            self.tasks_directory.relocated_file(self.lock_path(id))?,
+            self.daemon_directory
+                .relocated_file(self.lock_anchor_path(id))?,
+        )?;
         self.cleanup_legacy_task_lock(id)?;
+        self.tasks_directory.verify_visible()?;
+        self.daemon_directory.verify_visible()?;
         Ok(lock)
     }
 
     pub(crate) fn acquire_admission_lock(&self) -> Result<TaskLock, String> {
+        self.tasks_directory.verify_visible()?;
+        self.daemon_directory.verify_visible()?;
         let lock = TaskLock::acquire(
-            self.admission_lock_path(),
-            self.admission_lock_anchor_path(),
+            self.tasks_directory
+                .relocated_file(self.admission_lock_path())?,
+            self.daemon_directory
+                .relocated_file(self.admission_lock_anchor_path())?,
         )?;
         self.tasks_directory.verify_visible()?;
         self.daemon_directory.verify_visible()?;
@@ -1474,10 +1494,13 @@ impl DurableTaskStore {
 
     pub(crate) fn initialize_lock_namespace(&self) -> Result<(), String> {
         self.tasks_directory.verify_visible()?;
+        self.daemon_directory.verify_visible()?;
         for stripe in 0..TASK_LOCK_STRIPES {
             drop(TaskLock::acquire(
-                self.lock_path_for_stripe(stripe),
-                self.lock_anchor_path_for_stripe(stripe),
+                self.tasks_directory
+                    .relocated_file(self.lock_path_for_stripe(stripe))?,
+                self.daemon_directory
+                    .relocated_file(self.lock_anchor_path_for_stripe(stripe))?,
             )?);
         }
         drop(self.acquire_admission_lock()?);
@@ -1485,6 +1508,8 @@ impl DurableTaskStore {
     }
 
     pub(crate) fn migrate_legacy_task_locks(&self) -> Result<(), String> {
+        self.tasks_directory.verify_visible()?;
+        self.daemon_directory.verify_visible()?;
         self.tasks_directory.for_each_entry_bounded(
             MAX_LEGACY_LOCK_MIGRATION_ENTRIES,
             MAX_TASK_DIRECTORY_NAME_BYTES,
@@ -1492,7 +1517,11 @@ impl DurableTaskStore {
                 let Some(id) = legacy_visible_lock_id(&name) else {
                     return Ok(());
                 };
-                let _stripe = TaskLock::acquire(self.lock_path(&id), self.lock_anchor_path(&id))?;
+                let _stripe = TaskLock::acquire(
+                    self.tasks_directory.relocated_file(self.lock_path(&id))?,
+                    self.daemon_directory
+                        .relocated_file(self.lock_anchor_path(&id))?,
+                )?;
                 self.cleanup_legacy_task_lock(&id)
             },
         )?;
@@ -1503,7 +1532,11 @@ impl DurableTaskStore {
                 let Some(id) = legacy_anchor_lock_id(&name) else {
                     return Ok(());
                 };
-                let _stripe = TaskLock::acquire(self.lock_path(&id), self.lock_anchor_path(&id))?;
+                let _stripe = TaskLock::acquire(
+                    self.tasks_directory.relocated_file(self.lock_path(&id))?,
+                    self.daemon_directory
+                        .relocated_file(self.lock_anchor_path(&id))?,
+                )?;
                 self.cleanup_legacy_task_lock(&id)
             },
         )
@@ -1828,7 +1861,7 @@ pub(crate) fn publish_claimed_cancellation(
             &BackgroundTaskSession {
                 session_store: SessionStore::at_dir(sessions_dir.clone()),
                 session_id: session_id.clone(),
-                audit_log: DaemonAuditLog::at_path(store.daemon_dir().join("audit.jsonl")),
+                audit_log: store.audit_log()?,
             },
             "cancelled by user before worker start",
         ),
@@ -1849,7 +1882,7 @@ pub(crate) fn publish_claimed_cancellation(
                 owner,
                 task_id,
                 &SessionStore::at_dir(sessions_dir.clone()),
-                &DaemonAuditLog::at_path(store.daemon_dir().join("audit.jsonl")),
+                &store.audit_log()?,
                 ScheduleCancellation {
                     session_id,
                     repeat_count: *repeat_count,

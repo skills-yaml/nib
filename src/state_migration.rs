@@ -616,6 +616,59 @@ pub(crate) fn moved_sessions_dir(sessions_dir: &Path) -> Option<PathBuf> {
         .then(|| state.join(relative))
 }
 
+/// The user-home path of a legacy state entry that was renamed in place, when
+/// `path` no longer exists and `state.toml` records the move as done.
+///
+/// The returned directory is the same inode the holder already has open.
+/// Session directories are imported, not renamed, so they are not returned
+/// here; [`moved_sessions_dir`] is their record.
+pub(crate) fn migrated_counterpart(path: &Path) -> Option<PathBuf> {
+    if fs::symlink_metadata(path).is_ok() {
+        return None;
+    }
+    let (legacy, relative) = legacy_state_relative(path)?;
+    let project = legacy.parent()?;
+    if NibPaths::is_managed_worktree(project) {
+        return None;
+    }
+    let state = NibPaths::user_state_dir(project)?;
+    if state == legacy {
+        return None;
+    }
+    let record = read_record(&state.join(STATE_RECORD_FILE)).ok()??;
+    if record.status != "done" || !moved_covers(&record.moved, relative) {
+        return None;
+    }
+    let candidate = state.join(relative);
+    (candidate != path).then_some(candidate)
+}
+
+/// `<project>/.nib` and the path of `path` relative to it.
+fn legacy_state_relative(path: &Path) -> Option<(&Path, &Path)> {
+    let mut cursor = path;
+    loop {
+        if NibPaths::is_project_dir_name(cursor.file_name()?) {
+            let relative = path.strip_prefix(cursor).ok()?;
+            if relative.as_os_str().is_empty() {
+                return None;
+            }
+            return Some((cursor, relative));
+        }
+        cursor = cursor.parent()?;
+    }
+}
+
+/// Whether `relative` is a moved entry or a file inside one.
+fn moved_covers(moved: &[String], relative: &Path) -> bool {
+    let relative = relative.to_string_lossy();
+    moved.iter().any(|entry| {
+        relative == entry.as_str()
+            || relative
+                .strip_prefix(entry.as_str())
+                .is_some_and(|rest| rest.starts_with('/') || rest.starts_with('\\'))
+    })
+}
+
 /// The profile folders of a legacy `.nib`, sorted.
 fn legacy_profile_ids(legacy: &Path) -> Result<Vec<std::ffi::OsString>, String> {
     let profiles = legacy.join("profiles");
@@ -1028,3 +1081,7 @@ pub mod relink;
 #[cfg(test)]
 #[path = "state_migration_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "store_relocation_tests.rs"]
+mod store_relocation_tests;
