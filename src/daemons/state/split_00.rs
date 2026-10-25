@@ -178,6 +178,24 @@ impl std::fmt::Debug for StableDirectory {
     }
 }
 
+fn visible_directory_identity(path: &Path) -> Result<crate::fs_security::FileIdentity, String> {
+    #[cfg(not(windows))]
+    {
+        let visible = cap_std::fs::Dir::open_ambient_dir(path, cap_std::ambient_authority())
+            .map_err(|error| {
+                format!(
+                    "failed to re-open state directory {}: {error}",
+                    path.display()
+                )
+            })?;
+        stable_directory_identity(&visible, path)
+    }
+    #[cfg(windows)]
+    {
+        windows_visible_directory_identity(path)
+    }
+}
+
 impl StableDirectory {
     pub(crate) fn open(path: &Path) -> Result<Self, String> {
         crate::fs_security::verify_directory_without_symlinks(path)
@@ -621,21 +639,67 @@ impl StableDirectory {
     }
 
     pub(crate) fn verify_visible_at(&self, path: &Path) -> Result<(), String> {
+        if let Some(counterpart) = self.migrated_same_directory(path)? {
+            return self.verify_bound_identity(&counterpart);
+        }
         crate::fs_security::verify_directory_without_symlinks(path)
             .map_err(|error| format!("state directory changed: {error}"))?;
-        #[cfg(not(windows))]
-        let visible = cap_std::fs::Dir::open_ambient_dir(path, cap_std::ambient_authority())
-            .map_err(|error| {
-                format!(
-                    "failed to re-open state directory {}: {error}",
-                    path.display()
-                )
-            })?;
-        #[cfg(not(windows))]
-        let visible_identity = stable_directory_identity(&visible, path)?;
-        #[cfg(windows)]
-        let visible_identity = windows_visible_directory_identity(path)?;
-        if visible_identity != self.identity {
+        self.verify_bound_identity(path)
+    }
+
+    /// The renamed user-home directory when `path` is gone and it is the same
+    /// inode this handle already holds. A path that still exists, including a
+    /// symlink or a replacement directory, is not accepted.
+    fn migrated_same_directory(&self, path: &Path) -> Result<Option<PathBuf>, String> {
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("state directory changed: {error}")),
+        }
+        let Some(candidate) = crate::state_migration::migrated_counterpart(path) else {
+            return Ok(None);
+        };
+        if candidate == path {
+            return Err(format!(
+                "state directory changed: migrated directory is unsafe: {}",
+                path.display()
+            ));
+        }
+        crate::fs_security::verify_directory_without_symlinks(&candidate).map_err(|error| {
+            format!("state directory changed: migrated directory is unsafe: {error}")
+        })?;
+        match visible_directory_identity(&candidate) {
+            Ok(identity) if identity == self.identity => Ok(Some(candidate)),
+            Ok(_) => Err(format!(
+                "state directory identity changed while it was in use: {}",
+                path.display()
+            )),
+            Err(error) => Err(format!("state directory changed: {error}")),
+        }
+    }
+
+    /// `path` on the renamed directory when its parent is the directory this
+    /// handle holds and the migration moved that directory. A parent that
+    /// still exists is unchanged. A different inode is an error, so the
+    /// caller does not create the missing legacy path or write elsewhere.
+    pub(crate) fn relocated_file(&self, path: PathBuf) -> Result<PathBuf, String> {
+        let Some(parent) = path.parent() else {
+            return Ok(path);
+        };
+        if parent != self.path {
+            return Ok(path);
+        }
+        let Some(name) = path.file_name() else {
+            return Ok(path);
+        };
+        match self.migrated_same_directory(parent)? {
+            Some(counterpart) => Ok(counterpart.join(name)),
+            None => Ok(path),
+        }
+    }
+
+    fn verify_bound_identity(&self, path: &Path) -> Result<(), String> {
+        if visible_directory_identity(path)? != self.identity {
             return Err(format!(
                 "state directory identity changed while it was in use: {}",
                 path.display()

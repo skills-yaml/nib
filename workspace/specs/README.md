@@ -33,7 +33,9 @@ new work requires verified main merge. See [SDLC](../instructions/tech/sdlc.md).
 <!-- SPEC-CATALOG:START -->
 | Spec | Primary feature | State | Status rationale |
 | --- | --- | --- | --- |
+| [T089](test/architecture/T089_long_lived_store_reresolve.md) | architecture | test | Confirmed shared development merge f2f0544 via PR77 on 2026-10-25T17:07:25Z, pinned to reviewed head e3b74ad; patch member of applied 0.7.0; main delivery and publication remain separate. |
 | [T087](test/build-quality/T087_dead_code_and_test_cleanup.md) | build-quality | test | Confirmed shared development merge 89156f6 via PR71 (pinned to reviewed d3dc959) on 2026-10-25 after full task verify and Linux/macOS CI; shared minor 0.6.0; main delivery and publication remain separate. |
+| [T088](test/llm-providers/T088_all_provider_model_selection.md) | llm-providers | test | Confirmed shared development merge 76ed1bf via PR76 on 2026-10-25, pinned to independently reviewed and native/hosted-qualified 0d06470 with identical trees; minor 0.7.0; main delivery and publication remain separate. |
 | [T086](test/interactive/T086_codex_style_startup_screen.md) | interactive | test | Confirmed shared development merge fc10185 via PR68 (pinned to verified ff70dee) on 2026-10-22 after independent exact review and Linux/macOS CI; patch 0.5.2; main delivery and publication remain separate. |
 | [T083](test/skills-mcp/T083_progressive_skill_management.md) | skills-mcp | test | Confirmed shared development push at f83fc3874669e1ca1258381006c7f7434cd6dab6 after independent review and complete native verification; main delivery remains pending. |
 | [T085](test/interactive/T085_claude_style_waiting_indicator.md) | interactive | test | Confirmed shared development push93151e0 after exact review and full native task verify; main merge and publication remain separate. |
@@ -152,7 +154,7 @@ and Linux/macOS/Windows CI 37419726793 passed on that exact revision. Question
 forms, conversational recovery, Esc interruption and proposal chat are delivered;
 `/plan` and `/questions` are removed from interactive commands. See
 [T061](done/interactive/T061_question_form.md) for criterion evidence and actual events.
-Current catalog: **78 done, 11 test (T069-T073, T080, T082, T086, T087, FT-021, FT-022), 1 development (T023), and 0 backlog**. Publication is separate.
+Current catalog: **78 done, 17 test, 1 development, and 0 backlog**. Publication is separate.
 
 The 2026-07-15 audit inspected all 27 specs that had claimed completion. Unsupported
 claims moved through `development/`; missing feasible behavior was implemented and

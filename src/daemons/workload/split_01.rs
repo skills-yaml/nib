@@ -30,7 +30,7 @@ pub(crate) async fn run_terminal_worker(
     let session_target = BackgroundTaskSession {
         session_store: SessionStore::at_dir(job.sessions_dir.clone()),
         session_id: job.session_id.clone(),
-        audit_log: DaemonAuditLog::at_path(store.daemon_dir().join("audit.jsonl")),
+        audit_log: store.audit_log()?,
     };
     let mut environment_keys: Vec<_> = profile.custom_env().keys().cloned().collect();
     environment_keys.sort();
@@ -825,7 +825,7 @@ pub(crate) async fn run_schedule_worker(
         store.daemon_dir(),
     )?;
     let session_store = SessionStore::at_dir(job.sessions_dir.clone());
-    let audit = DaemonAuditLog::at_path(store.daemon_dir().join("audit.jsonl"));
+    let audit = store.audit_log()?;
     for occurrence in 1..=job.repeat_count {
         loop {
             let record = match store.poll_worker_owned(task_id, owner, false) {
@@ -1118,13 +1118,12 @@ pub(crate) enum ScheduleReconcileAudit {
 #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 pub(crate) fn reconcile_expired_job(
     job: &DurableJob,
-    daemon_dir: &Path,
+    audit: &DaemonAuditLog,
     task_id: &str,
     execution_id: &str,
     occurrence: Option<u32>,
     error: &str,
 ) -> Result<(), String> {
-    let audit = DaemonAuditLog::at_path(daemon_dir.join("audit.jsonl"));
     match job {
         DurableJob::Terminal {
             sessions_dir,
@@ -1134,7 +1133,7 @@ pub(crate) fn reconcile_expired_job(
             &BackgroundTaskSession {
                 session_store: SessionStore::at_dir(sessions_dir.clone()),
                 session_id: session_id.clone(),
-                audit_log: audit,
+                audit_log: audit.clone(),
             },
             task_id,
             execution_id,
@@ -1253,7 +1252,7 @@ pub(crate) fn reconcile_expired_job(
                 .map_err(|failure| format!("failed to reconcile scheduled session: {failure}"))?;
             match audit_action {
                 ScheduleReconcileAudit::ReconciledFailure => append_schedule_audit_once(
-                    &audit,
+                    audit,
                     session_id,
                     "reconcile_expired_worker",
                     "failed",
@@ -1267,7 +1266,7 @@ pub(crate) fn reconcile_expired_job(
                     detail,
                     delivery_key,
                 } => append_schedule_audit_once(
-                    &audit,
+                    audit,
                     session_id,
                     action,
                     outcome,

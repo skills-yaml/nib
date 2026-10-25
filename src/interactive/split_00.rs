@@ -877,10 +877,22 @@ pub fn modal_command_unsupported_message() -> &'static str {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelChoice {
+    pub provider: String,
+    pub model: String,
+}
+
+impl ModelChoice {
+    pub fn label(&self) -> String {
+        format!("{} ({})", self.model, self.provider)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelSelection {
     pub provider: String,
     pub current: String,
-    pub available: Vec<String>,
+    pub available: Vec<ModelChoice>,
     pub sensitive_values: Vec<String>,
 }
 

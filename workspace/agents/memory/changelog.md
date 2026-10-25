@@ -926,3 +926,16 @@ Content:
 
 Recorded the T082, FT-021 and FT-022 decisions in decisions.md, and the
 focused-test guard and the 0.6.0 development integration in facts.md.
+
+## 2026-10-25 - All-provider model selection preference
+
+- Type: preference
+- Source: user, explicit clarification
+- Confidence: high
+- Review: independent exact-candidate review before delivery
+
+Content:
+
+Recorded in preferences.md that `/model` offers models across all configured
+providers and switches provider with the selected model. Provider/model identity
+is structured; typed exact IDs remain opaque. T088 tracks implementation and gates.

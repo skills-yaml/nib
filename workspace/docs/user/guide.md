@@ -425,6 +425,13 @@ allowlist.
 Older OpenAI models, unselected Gemini variants and Grok Build remain usable when
 explicitly configured. A configured replacement list also remains authoritative.
 
+`/model` lists suggestions from all configured providers, with the provider shown
+beside each model. Selecting a choice switches the active provider and its selected
+model together; the next run uses that provider’s existing credentials and transport
+settings. Identical model IDs on different providers remain distinct. Typing an exact
+model ID continues to select a model for the active provider. Suggestions remain
+offline and advisory.
+
 The list is advisory rather than an allowlist. Omit `models` to inherit the bundled
 suggestions, set it to an ordered list to replace them for that provider, or set it to
 `[]` to show only the selected `model`. nib never rewrites an existing selected model

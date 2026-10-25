@@ -58,7 +58,7 @@ pub use split_00::{
 };
 pub use split_00::{
     modal_command_unsupported_message, InteractiveAgentMode, InteractiveEffect,
-    InteractiveProfileScope, ModelSelection,
+    InteractiveProfileScope, ModelChoice, ModelSelection,
 };
 pub use split_00::{
     parse_proposed_question_input, InteractionTerminalOutcome, ProposedQuestionInput,
@@ -100,7 +100,6 @@ pub use split_01::{
     persist_queued_follow_up, queue_disposition_message, queued_follow_up_count,
     take_next_queued_follow_up,
 };
-pub use split_02::set_active_model;
 pub use split_02::{
     display_stream_event_with_sensitive_values, execute_interactive_command,
     parse_interactive_command, resolve_session,
@@ -116,6 +115,7 @@ pub use split_02::{
     maybe_assign_session_display_name, session_title_from_conversation, SessionResolution,
     StreamDisplay,
 };
+pub use split_02::{set_active_model, set_provider_model};
 pub use split_03::parse_steer_line;
 pub use split_03::{
     classify_composer_submit, parse_queue_line, steer_hint_message, ActivityEntry, ActivityKind,
@@ -135,3 +135,5 @@ pub use question_state::{
 
 mod edit_fork;
 pub(crate) use edit_fork::fork_before_last_user;
+
+mod model_selection;

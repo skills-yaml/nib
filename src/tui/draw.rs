@@ -827,7 +827,11 @@ pub(crate) fn draw_loop(
                         }
                         ModelAction::Submit(selected) => {
                             pending_model = None;
-                            match set_active_model(project_root, &selected) {
+                            match set_provider_model(
+                                project_root,
+                                &selected.provider,
+                                &selected.model,
+                            ) {
                                 Ok(output) => timeline.push_status(output),
                                 Err(error) => {
                                     timeline.push_status(format!("[command error] {error}"))
