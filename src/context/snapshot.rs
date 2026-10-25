@@ -38,8 +38,16 @@ pub struct UsageTotals {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
+    #[serde(default)]
+    pub cache_write_input_tokens: Option<u64>,
     pub reasoning_output_tokens: Option<u64>,
     pub unknown: bool,
+    /// Distinct requests whose usage contributed to these totals.
+    #[serde(default)]
+    pub request_count: u64,
+    /// True when the bounded event scan stopped before older usage history.
+    #[serde(default)]
+    pub history_truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -276,6 +284,7 @@ pub fn usage_event_details(run_id: &str, request_sequence: u64, usage: Option<&L
             "output_tokens": usage.output_tokens,
             "total_tokens": usage.total_tokens,
             "cached_input_tokens": usage.cached_input_tokens,
+            "cache_write_input_tokens": usage.cache_write_input_tokens,
             "reasoning_output_tokens": usage.reasoning_output_tokens,
         }),
         None => json!({
@@ -291,11 +300,20 @@ pub fn accumulate_session_usage(session: &Session) -> UsageTotals {
         input_tokens: Some(0),
         output_tokens: Some(0),
         cached_input_tokens: Some(0),
+        cache_write_input_tokens: Some(0),
         reasoning_output_tokens: Some(0),
         unknown: false,
+        request_count: 0,
+        history_truncated: false,
     };
     let mut seen = std::collections::BTreeSet::new();
     let mut observed = false;
+    let usage_events = session
+        .events
+        .iter()
+        .filter(|event| event.kind == "context_usage")
+        .count();
+    totals.history_truncated = usage_events > MAX_USAGE_EVENTS_SCAN;
     for event in session
         .events
         .iter()
@@ -313,7 +331,13 @@ pub fn accumulate_session_usage(session: &Session) -> UsageTotals {
             .get("request_sequence")
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        if !seen.insert((run_id.to_string(), sequence)) {
+        // FT-021 escalation calls share the run but not the worker's sequence.
+        let model_role = event
+            .details
+            .get("model_role")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if !seen.insert((run_id.to_string(), sequence, model_role.to_string())) {
             continue;
         }
         if event
@@ -330,10 +354,15 @@ pub fn accumulate_session_usage(session: &Session) -> UsageTotals {
             continue;
         };
         observed = true;
+        totals.request_count += 1;
         totals.input_tokens = add_optional(totals.input_tokens, Some(usage.input_tokens));
         totals.output_tokens = add_optional(totals.output_tokens, Some(usage.output_tokens));
         totals.cached_input_tokens =
             add_optional(totals.cached_input_tokens, usage.cached_input_tokens);
+        totals.cache_write_input_tokens = add_optional(
+            totals.cache_write_input_tokens,
+            usage.cache_write_input_tokens,
+        );
         totals.reasoning_output_tokens = add_optional(
             totals.reasoning_output_tokens,
             usage.reasoning_output_tokens,
@@ -343,6 +372,7 @@ pub fn accumulate_session_usage(session: &Session) -> UsageTotals {
         totals.input_tokens = None;
         totals.output_tokens = None;
         totals.cached_input_tokens = None;
+        totals.cache_write_input_tokens = None;
         totals.reasoning_output_tokens = None;
         totals.unknown = true;
     }
@@ -584,8 +614,11 @@ fn usage_totals_from_validated(usage: &LlmUsage) -> UsageTotals {
         input_tokens: Some(usage.input_tokens),
         output_tokens: Some(usage.output_tokens),
         cached_input_tokens: usage.cached_input_tokens,
+        cache_write_input_tokens: usage.cache_write_input_tokens,
         reasoning_output_tokens: usage.reasoning_output_tokens,
         unknown: false,
+        request_count: 1,
+        history_truncated: false,
     }
 }
 
@@ -599,6 +632,13 @@ fn usage_from_event(details: &Value) -> Option<LlmUsage> {
             .get("reasoning_output_tokens")
             .and_then(Value::as_u64),
     )
+    .and_then(|usage| {
+        usage.with_cache_write_input_tokens(
+            details
+                .get("cache_write_input_tokens")
+                .and_then(Value::as_u64),
+        )
+    })
     .ok()
 }
 
@@ -655,26 +695,61 @@ fn format_snapshot_lines(snapshot: &RequestSnapshot) -> String {
     lines
 }
 
+fn format_optional_tokens(value: Option<u64>) -> String {
+    value.map_or_else(|| "unknown".to_string(), |count| count.to_string())
+}
+
+/// Cache-read share of reported input. Shown only when both counts are known
+/// for the same denominator; zero input yields no ratio.
+fn cache_read_ratio(usage: &UsageTotals) -> String {
+    match (usage.cached_input_tokens, usage.input_tokens) {
+        (Some(read), Some(input)) if input > 0 => {
+            format!("{}%", read.saturating_mul(100) / input)
+        }
+        _ => "n/a".to_string(),
+    }
+}
+
+fn format_usage_breakdown(usage: &UsageTotals) -> String {
+    format!(
+        "in {} · out {} (cache read {} · cache write {} · read ratio {} · reasoning {})",
+        usage.input_tokens.unwrap_or(0),
+        usage.output_tokens.unwrap_or(0),
+        format_optional_tokens(usage.cached_input_tokens),
+        format_optional_tokens(usage.cache_write_input_tokens),
+        cache_read_ratio(usage),
+        format_optional_tokens(usage.reasoning_output_tokens),
+    )
+}
+
 fn format_usage_line(cumulative: &UsageTotals, request: Option<&UsageTotals>) -> String {
     let request_line = match request {
-        Some(usage) if !usage.unknown => format!(
-            "Request occupancy usage: in {} · out {} (cache {:?} · reasoning {:?})",
-            usage.input_tokens.unwrap_or(0),
-            usage.output_tokens.unwrap_or(0),
-            usage.cached_input_tokens,
-            usage.reasoning_output_tokens
-        ),
+        Some(usage) if !usage.unknown => {
+            format!("Request occupancy usage: {}", format_usage_breakdown(usage))
+        }
         _ => "Request occupancy usage: unknown".to_string(),
     };
+    let coverage = if cumulative.history_truncated {
+        format!(
+            "latest {} request(s); older history not scanned",
+            cumulative.request_count
+        )
+    } else {
+        format!("{} request(s)", cumulative.request_count)
+    };
     let cumulative_line = if cumulative.unknown {
-        "Cumulative consumption: unknown/partial (not zero)".to_string()
+        if cumulative.request_count == 0 {
+            "Cumulative consumption: unknown/partial (not zero)".to_string()
+        } else {
+            format!(
+                "Cumulative consumption: unknown/partial (not zero); known subset {} over {coverage}",
+                format_usage_breakdown(cumulative)
+            )
+        }
     } else {
         format!(
-            "Cumulative consumption: in {} · out {} (cache {:?} · reasoning {:?})",
-            cumulative.input_tokens.unwrap_or(0),
-            cumulative.output_tokens.unwrap_or(0),
-            cumulative.cached_input_tokens,
-            cumulative.reasoning_output_tokens
+            "Cumulative consumption: {} over {coverage}",
+            format_usage_breakdown(cumulative)
         )
     };
     format!("{request_line}\n{cumulative_line}")
@@ -788,6 +863,7 @@ mod tests {
             tools: Some(vec![
                 json!({"type":"function","function":{"name":"run_terminal"}}),
             ]),
+            reusable_system_prefix_bytes: None,
             approximate_tokens: tokens,
             raw_message_count: 4,
             raw_tool_count: 3,
@@ -836,6 +912,7 @@ mod tests {
         let payload = BoundedLlmInput {
             messages: vec![json!({"role":"user","content":"fn main() { println!(\"🙂\"); }"})],
             tools: None,
+            reusable_system_prefix_bytes: None,
             approximate_tokens: 12,
             raw_message_count: 1,
             raw_tool_count: 0,
@@ -951,6 +1028,91 @@ mod tests {
         assert!(totals.unknown);
         assert_eq!(totals.input_tokens, Some(20));
         assert_eq!(totals.output_tokens, Some(5));
+    }
+
+    fn usage_session(events: Vec<Value>) -> Session {
+        serde_json::from_value(json!({
+            "id": "cache-usage",
+            "messages": [],
+            "events": events
+                .into_iter()
+                .enumerate()
+                .map(|(index, details)| json!({"index": index, "kind": "context_usage", "details": details}))
+                .collect::<Vec<_>>(),
+        }))
+        .expect("session")
+    }
+
+    #[test]
+    fn cache_read_and_write_usage_persist_accumulate_and_render() {
+        let first = LlmUsage::new(100, 10, 110, Some(40), None)
+            .unwrap()
+            .with_cache_write_input_tokens(Some(50))
+            .unwrap();
+        let second = LlmUsage::new(100, 5, 105, Some(90), Some(1))
+            .unwrap()
+            .with_cache_write_input_tokens(Some(0))
+            .unwrap();
+        let details = usage_event_details("run-c", 1, Some(&first));
+        assert_eq!(details["cache_write_input_tokens"], 50);
+        let session = usage_session(vec![
+            details.clone(),
+            details,
+            usage_event_details("run-c", 2, Some(&second)),
+        ]);
+        let totals = accumulate_session_usage(&session);
+        assert!(!totals.unknown);
+        assert_eq!(totals.request_count, 2);
+        assert_eq!(totals.input_tokens, Some(200));
+        assert_eq!(totals.cached_input_tokens, Some(130));
+        assert_eq!(totals.cache_write_input_tokens, Some(50));
+        let text = inspect_text(&session, None, true);
+        assert!(
+            text.contains("Cumulative consumption: in 200 · out 15 (cache read 130 · cache write 50 · read ratio 65% · reasoning unknown) over 2 request(s)"),
+            "{text}"
+        );
+        assert_eq!(
+            inspect_json(&session, None)["usage"]["cache_write_input_tokens"],
+            50
+        );
+
+        // Legacy events without a write count keep the category unknown, not zero.
+        let mut legacy = usage_event_details("run-d", 1, Some(&second));
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("cache_write_input_tokens");
+        let partial = usage_session(vec![usage_event_details("run-d", 0, Some(&first)), legacy]);
+        let totals = accumulate_session_usage(&partial);
+        assert_eq!(totals.cache_write_input_tokens, None);
+        assert!(inspect_text(&partial, None, true).contains("cache write unknown"));
+    }
+
+    #[test]
+    fn usage_display_handles_zero_input_unknown_requests_and_bounded_coverage() {
+        let zero = LlmUsage::new(0, 3, 3, Some(0), None).unwrap();
+        let session = usage_session(vec![
+            usage_event_details("run-z", 1, Some(&zero)),
+            usage_event_details("run-z", 2, None),
+        ]);
+        let text = inspect_text(&session, None, true);
+        assert!(text.contains("read ratio n/a"), "{text}");
+        assert!(
+            text.contains("Cumulative consumption: unknown/partial (not zero); known subset in 0"),
+            "{text}"
+        );
+
+        let usage = LlmUsage::new(10, 1, 11, Some(5), None).unwrap();
+        let many = usage_session(
+            (0..(MAX_USAGE_EVENTS_SCAN as u64 + 4))
+                .map(|sequence| usage_event_details("run-many", sequence, Some(&usage)))
+                .collect(),
+        );
+        let totals = accumulate_session_usage(&many);
+        assert!(totals.history_truncated);
+        assert_eq!(totals.request_count, MAX_USAGE_EVENTS_SCAN as u64);
+        assert!(inspect_text(&many, None, true)
+            .contains("latest 256 request(s); older history not scanned"));
     }
 
     #[test]

@@ -322,6 +322,9 @@ pub struct AgentConfig {
     /// interactive request. Projects may explicitly disable this route.
     #[serde(default = "default_true")]
     pub answer_only: bool,
+    /// Cost-controlled model escalation (FT-021). Off unless a model is set.
+    #[serde(default, skip_serializing_if = "EscalationConfig::is_default")]
+    pub escalation: EscalationConfig,
 }
 
 impl Default for AgentConfig {
@@ -330,9 +333,53 @@ impl Default for AgentConfig {
             max_turns: default_max_turns(),
             tool_use_enforcement: true,
             answer_only: true,
+            escalation: EscalationConfig::default(),
         }
     }
 }
+
+/// The run's provider/model is the worker. A configured escalation model from
+/// the same provider catalog gives bounded advice or a one-turn takeover.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EscalationConfig {
+    /// Exact escalation model ID. Escalation is off while this is unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Configured provider for the escalation model; defaults to the run's provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Escalations (advice or takeover) allowed in one run.
+    #[serde(default = "default_max_escalations_per_run")]
+    pub max_per_run: u32,
+}
+
+impl Default for EscalationConfig {
+    fn default() -> Self {
+        Self {
+            model: None,
+            provider: None,
+            max_per_run: default_max_escalations_per_run(),
+        }
+    }
+}
+
+impl EscalationConfig {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+
+    /// True when a model is configured and at least one escalation is allowed.
+    pub fn enabled(&self) -> bool {
+        self.model.is_some() && self.max_per_run > 0
+    }
+}
+
+pub(crate) fn default_max_escalations_per_run() -> u32 {
+    2
+}
+
+pub(crate) const MAX_ESCALATIONS_PER_RUN: u32 = 16;
 
 pub(crate) fn default_max_turns() -> u32 {
     90
@@ -647,6 +694,42 @@ impl fmt::Display for ReasoningEffort {
     }
 }
 
+/// Provider prompt-cache policy (FT-022).
+///
+/// `auto` (the default when omitted) sends reviewed cache controls with the
+/// provider's short retention; `extended` opts into longer retention where a
+/// reviewed mapping exists; `off` sends no optional cache controls. `off` cannot
+/// disable a provider's implicit caching.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PromptCachePolicy {
+    #[default]
+    Auto,
+    Extended,
+    Off,
+}
+
+impl PromptCachePolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Extended => "extended",
+            Self::Off => "off",
+        }
+    }
+}
+
+impl fmt::Display for PromptCachePolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Providers with a reviewed extended-retention cache mapping.
+pub fn supports_extended_prompt_cache(name: &str) -> bool {
+    name == "anthropic"
+}
+
 pub fn is_openai_compatible_provider(name: &str) -> bool {
     crate::llm::registry::provider_descriptor(name)
         .is_some_and(|provider| provider.is_openai_compatible())
@@ -666,11 +749,17 @@ pub struct ProviderEntry {
     pub api: Option<LlmApiMode>,
     #[serde(default)]
     pub reasoning_effort: Option<ReasoningEffort>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache: Option<PromptCachePolicy>,
 }
 
 impl ProviderEntry {
     pub fn resolved_api_mode(&self) -> LlmApiMode {
         self.api.unwrap_or_default()
+    }
+
+    pub fn resolved_prompt_cache(&self) -> PromptCachePolicy {
+        self.prompt_cache.unwrap_or_default()
     }
 }
 
@@ -861,6 +950,13 @@ impl NibConfig {
                     "llm.providers.{name}.api and reasoning_effort are supported only by OpenAI-compatible providers"
                 ));
             }
+            if provider.prompt_cache == Some(PromptCachePolicy::Extended)
+                && !supports_extended_prompt_cache(name)
+            {
+                issues.push(format!(
+                    "llm.providers.{name}.prompt_cache = 'extended' is supported only by anthropic; use 'auto' or 'off'"
+                ));
+            }
             if name == "mock"
                 && (provider.api_key.is_some()
                     || !provider.api_keys.is_empty()
@@ -906,6 +1002,31 @@ impl NibConfig {
             issues.push("agent.max_turns must be greater than zero".to_string());
         } else if self.agent.max_turns > MAX_AGENT_TURNS {
             issues.push(format!("agent.max_turns must be at most {MAX_AGENT_TURNS}"));
+        }
+        if let Some(model) = &self.agent.escalation.model {
+            if model.trim().is_empty() {
+                issues.push("agent.escalation.model must not be empty when configured".to_string());
+            } else if model.len() > MAX_MODEL_BYTES || model.contains('\0') {
+                issues.push(format!(
+                    "agent.escalation.model must be at most {MAX_MODEL_BYTES} bytes and contain no NUL"
+                ));
+            }
+        }
+        if let Some(provider) = &self.agent.escalation.provider {
+            if !is_safe_identifier(provider) {
+                issues.push(format!(
+                    "agent.escalation.provider must be at most {MAX_IDENTIFIER_BYTES} bytes and contain only supported identifier characters"
+                ));
+            } else if !self.llm.providers.contains_key(provider) {
+                issues.push(format!(
+                    "agent.escalation.provider '{provider}' must name a configured llm.providers entry"
+                ));
+            }
+        }
+        if self.agent.escalation.max_per_run > MAX_ESCALATIONS_PER_RUN {
+            issues.push(format!(
+                "agent.escalation.max_per_run must be at most {MAX_ESCALATIONS_PER_RUN}"
+            ));
         }
         if !matches!(
             self.execution.provider.as_str(),
@@ -1614,6 +1735,7 @@ impl LlmConfig {
                 base_url: None,
                 api: default_api,
                 reasoning_effort: None,
+                prompt_cache: None,
             });
         entry.model = model;
         if api_key.is_some() {

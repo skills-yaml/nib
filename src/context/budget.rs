@@ -26,6 +26,9 @@ const MAX_HELP_CONTEXT_TOKENS: usize = 420;
 pub struct BoundedLlmInput {
     pub messages: Vec<Value>,
     pub tools: Option<Vec<Value>>,
+    /// Byte length of the leading system-prompt content that is stable across
+    /// adjacent requests; providers with explicit breakpoints cache up to it.
+    pub reusable_system_prefix_bytes: Option<usize>,
     pub approximate_tokens: usize,
     pub raw_message_count: usize,
     pub raw_tool_count: usize,
@@ -49,6 +52,29 @@ pub struct PlanningPromptRequest<'a> {
     pub goal: &'a str,
     pub tools: &'a [Value],
     pub context_length: usize,
+}
+
+impl BoundedLlmInput {
+    /// Typed provider messages with the reusable system prefix marked.
+    pub fn typed_messages(&self) -> Result<Vec<crate::llm::LlmMessage>, String> {
+        typed_llm_messages(&self.messages, self.reusable_system_prefix_bytes)
+    }
+}
+
+/// Converts bounded wire messages to typed messages, marking the reusable
+/// prefix on the leading system message only. The boundary never changes the
+/// content that is sent.
+pub fn typed_llm_messages(
+    messages: &[Value],
+    reusable_system_prefix_bytes: Option<usize>,
+) -> Result<Vec<crate::llm::LlmMessage>, String> {
+    let mut typed = crate::llm::LlmMessage::from_openai_values(messages)?;
+    if let (Some(first), Some(bytes)) = (typed.first_mut(), reusable_system_prefix_bytes) {
+        if first.role == crate::llm::LlmMessageRole::System {
+            *first = first.clone().with_reusable_prefix(bytes);
+        }
+    }
+    Ok(typed)
 }
 
 pub fn approximate_llm_input_tokens(messages: &[Value], tools: Option<&[Value]>) -> usize {
@@ -138,6 +164,7 @@ pub fn bound_single_turn_input(
     let approximate_tokens = approximate_llm_input_tokens(&selected, tools.as_deref());
     Ok(BoundedLlmInput {
         messages: selected,
+        reusable_system_prefix_bytes: None,
         raw_message_count: 2,
         raw_tool_count: tools.as_ref().map_or(0, Vec::len),
         included_tool_count: tools.as_ref().map_or(0, Vec::len),
@@ -182,12 +209,14 @@ pub fn build_bounded_planning_input(
                 request.context_length
             ));
         }
-        let runtime_context = render_runtime_context(request.context, None, None, context_budget);
+        let runtime_context =
+            render_runtime_context_parts(request.context, None, None, context_budget);
         let session_context = request
             .session
             .map(|session| render_planning_session_context(session, session_budget))
             .unwrap_or_default();
-        let system_prompt = build_planning_system_prompt(&runtime_context, &session_context);
+        let (system_prompt, reusable_system_prefix_bytes) =
+            build_planning_system_prompt(&runtime_context, &session_context);
         let messages = vec![
             json!({"role": "system", "content": system_prompt}),
             json!({"role": "user", "content": truncate_to_tokens(request.goal, goal_budget)}),
@@ -199,6 +228,7 @@ pub fn build_bounded_planning_input(
             return Ok(BoundedLlmInput {
                 messages,
                 tools,
+                reusable_system_prefix_bytes: Some(reusable_system_prefix_bytes),
                 approximate_tokens: actual,
                 raw_message_count: request
                     .session
@@ -271,13 +301,13 @@ pub fn build_bounded_runtime_input(
                 request.context_length
             ));
         }
-        let optional_context = render_runtime_context(
+        let optional_context = render_runtime_context_parts(
             request.context,
             request.current_step,
             bounded_history.summary.as_deref(),
             context_budget,
         );
-        let system_prompt = build_runtime_system_prompt(
+        let (system_prompt, reusable_system_prefix_bytes) = build_runtime_system_prompt(
             &optional_context,
             &truncate_to_tokens(&help_context, help_budget),
             request.mode,
@@ -294,6 +324,7 @@ pub fn build_bounded_runtime_input(
             let candidate = BoundedLlmInput {
                 messages,
                 tools,
+                reusable_system_prefix_bytes: Some(reusable_system_prefix_bytes),
                 approximate_tokens: actual,
                 raw_message_count: bounded_history.raw_message_count,
                 raw_tool_count: request.tools.map_or(0, <[Value]>::len),
@@ -343,15 +374,27 @@ fn shrink_budget(budget: &mut usize, minimum: usize, overflow: usize) -> usize {
     overflow.saturating_sub(reduction)
 }
 
+/// Byte length of the reusable system prefix: the fixed head plus the stable
+/// runtime-context sections that immediately follow it.
+fn reusable_prefix_bytes(head: &str, context: &RenderedRuntimeContext) -> usize {
+    if context.text.is_empty() || context.stable_bytes == 0 {
+        head.len()
+    } else {
+        head.len() + 2 + context.stable_bytes
+    }
+}
+
+/// Returns the system prompt and the byte length of its reusable prefix.
 fn build_runtime_system_prompt(
-    context: &str,
+    rendered: &RenderedRuntimeContext,
     help_context: &str,
     mode: &str,
     project_root: &Path,
     tool_use_enforcement: bool,
     tool_count: usize,
-) -> String {
+) -> (String, usize) {
     let root = truncate_to_tokens(&project_root.display().to_string(), MAX_PROJECT_ROOT_TOKENS);
+    let context = rendered.text.as_str();
     if mode == "answer_only" {
         let context = if context.is_empty() {
             String::new()
@@ -363,11 +406,13 @@ fn build_runtime_system_prompt(
         } else {
             format!("\n\n{help_context}")
         };
-        return format!(
-            "{}\n\n{}\nProject root: {root}{context}{help_context}",
+        let head = format!(
+            "{}\n\n{}\nProject root: {root}",
             crate::agent::instructions::SHARED,
             crate::agent::instructions::ANSWER_ONLY,
         );
+        let prefix = reusable_prefix_bytes(&head, rendered);
+        return (format!("{head}{context}{help_context}"), prefix);
     }
     let tool_instruction = if tool_use_enforcement && tool_count > 0 {
         "For any step that claims an observable inspection or change, use an available tool and ground the result in its returned artifact."
@@ -379,30 +424,38 @@ fn build_runtime_system_prompt(
     } else {
         format!("\n\n{context}")
     };
-    format!(
-        "{}\n\n{}\n{}\n{tool_instruction}\nProject root: {root}\nCurrent mode: {mode}{context}",
+    let head = format!(
+        "{}\n\n{}\n{}\n{tool_instruction}\nProject root: {root}\nCurrent mode: {mode}",
         crate::agent::instructions::SHARED,
         crate::agent::instructions::EXECUTION,
         crate::agent::instructions::COMMUNICATION,
-    )
+    );
+    let prefix = reusable_prefix_bytes(&head, rendered);
+    (format!("{head}{context}"), prefix)
 }
 
-fn build_planning_system_prompt(runtime_context: &str, session_context: &str) -> String {
-    let runtime_context = if runtime_context.is_empty() {
+/// Returns the planning system prompt and the byte length of its reusable prefix.
+fn build_planning_system_prompt(
+    rendered: &RenderedRuntimeContext,
+    session_context: &str,
+) -> (String, usize) {
+    let runtime_context = if rendered.text.is_empty() {
         String::new()
     } else {
-        format!("\n\n{runtime_context}")
+        format!("\n\n{}", rendered.text)
     };
     let session_context = if session_context.is_empty() {
         String::new()
     } else {
         format!("\n\n{session_context}")
     };
-    format!(
-        "{}\n\n{}{runtime_context}{session_context}",
+    let head = format!(
+        "{}\n\n{}",
         crate::agent::instructions::SHARED,
         crate::agent::instructions::PLANNING,
-    )
+    );
+    let prefix = reusable_prefix_bytes(&head, rendered);
+    (format!("{head}{runtime_context}{session_context}"), prefix)
 }
 
 fn render_planning_session_context(session: &Session, max_tokens: usize) -> String {
@@ -433,13 +486,35 @@ fn render_planning_session_context(session: &Session, max_tokens: usize) -> Stri
     truncate_to_chars(&content, max_tokens.saturating_mul(4))
 }
 
-#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
+#[cfg(test)]
 fn render_runtime_context(
     context: &RuntimeContextSections,
     current_step: Option<&str>,
     summary: Option<&str>,
     max_tokens: usize,
 ) -> String {
+    render_runtime_context_parts(context, current_step, summary, max_tokens).text
+}
+
+/// Runtime context rendered as one string whose first `stable_bytes` hold the
+/// reusable sections (FT-022).
+struct RenderedRuntimeContext {
+    text: String,
+    stable_bytes: usize,
+}
+
+/// Renders reusable sections (guidelines, references, catalog skills, memory)
+/// before changing task state so adjacent requests share a stable prefix. Each
+/// group's allocation depends only on the set of present groups and their
+/// weights, never on another group's content, so changing only the task or step
+/// leaves the stable prefix byte-identical.
+#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
+fn render_runtime_context_parts(
+    context: &RuntimeContextSections,
+    current_step: Option<&str>,
+    summary: Option<&str>,
+    max_tokens: usize,
+) -> RenderedRuntimeContext {
     let agents = [RuntimeContextSection {
         label: "Loaded project instructions".to_string(),
         content: context.agents.clone(),
@@ -465,42 +540,21 @@ fn render_runtime_context(
     let required_skills = render_required_skills(context);
     let memory = unique_sections(&context.memory);
     let workload = unique_sections(&context.workload);
-    let mut groups = vec![
-        (
-            "Project Agent Guidelines",
-            agents.as_slice(),
-            30usize,
-            MIN_CONTEXT_SECTION_CHARS,
-        ),
-        (
-            "Current Task",
-            task.as_slice(),
-            20usize,
-            MIN_CONTEXT_SECTION_CHARS,
-        ),
-    ];
+    // (title, sections, weight, minimum section chars, stable)
+    let mut groups = vec![(
+        "Project Agent Guidelines",
+        agents.as_slice(),
+        30usize,
+        MIN_CONTEXT_SECTION_CHARS,
+        true,
+    )];
     if !project_docs.is_empty() {
         groups.push((
             "Project Standards and Library Documentation",
             project_docs.as_slice(),
             15,
             MIN_PROJECT_DOC_SECTION_CHARS,
-        ));
-    }
-    if !attachments.is_empty() {
-        groups.push((
-            "Attached Project Paths",
-            attachments.as_slice(),
-            15,
-            MIN_PROJECT_DOC_SECTION_CHARS,
-        ));
-    }
-    if let Some(step) = step.as_ref() {
-        groups.push((
-            "Approved Plan Step",
-            std::slice::from_ref(step),
-            15,
-            MIN_CONTEXT_SECTION_CHARS,
+            true,
         ));
     }
     if !skills.is_empty() {
@@ -509,6 +563,7 @@ fn render_runtime_context(
             skills.as_slice(),
             20,
             MIN_CONTEXT_SECTION_CHARS,
+            true,
         ));
     }
     if !memory.is_empty() {
@@ -517,6 +572,32 @@ fn render_runtime_context(
             memory.as_slice(),
             5,
             MIN_CONTEXT_SECTION_CHARS,
+            true,
+        ));
+    }
+    groups.push((
+        "Current Task",
+        task.as_slice(),
+        20usize,
+        MIN_CONTEXT_SECTION_CHARS,
+        false,
+    ));
+    if !attachments.is_empty() {
+        groups.push((
+            "Attached Project Paths",
+            attachments.as_slice(),
+            15,
+            MIN_PROJECT_DOC_SECTION_CHARS,
+            false,
+        ));
+    }
+    if let Some(step) = step.as_ref() {
+        groups.push((
+            "Approved Plan Step",
+            std::slice::from_ref(step),
+            15,
+            MIN_CONTEXT_SECTION_CHARS,
+            false,
         ));
     }
     if !workload.is_empty() {
@@ -525,6 +606,7 @@ fn render_runtime_context(
             workload.as_slice(),
             5,
             MIN_CONTEXT_SECTION_CHARS,
+            false,
         ));
     }
     if let Some(summary) = summary.as_ref() {
@@ -533,6 +615,7 @@ fn render_runtime_context(
             std::slice::from_ref(summary),
             10,
             MIN_CONTEXT_SECTION_CHARS,
+            false,
         ));
     }
 
@@ -546,18 +629,32 @@ fn render_runtime_context(
     let weighted_chars = available_chars.saturating_sub(floor * groups.len());
     let total_weight = groups
         .iter()
-        .map(|(_, _, weight, _)| *weight)
+        .map(|(_, _, weight, _, _)| *weight)
         .sum::<usize>();
-    groups
+    let rendered = groups
         .into_iter()
-        .filter_map(|(title, sections, weight, minimum_section_chars)| {
+        .filter_map(|(title, sections, weight, minimum_section_chars, stable)| {
             let chars = floor + weighted_chars * weight / total_weight.max(1);
             let rendered = render_group(title, sections, chars, minimum_section_chars);
-            (!rendered.is_empty()).then_some(rendered)
+            (!rendered.is_empty()).then_some((rendered, stable))
         })
-        .chain((!required_skills.is_empty()).then_some(required_skills))
+        .chain((!required_skills.is_empty()).then_some((required_skills, false)))
+        .collect::<Vec<_>>();
+    let stable = rendered
+        .iter()
+        .take_while(|(_, stable)| *stable)
+        .map(|(text, _)| text.as_str())
         .collect::<Vec<_>>()
-        .join("\n\n")
+        .join("\n\n");
+    let text = rendered
+        .iter()
+        .map(|(text, _)| text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    RenderedRuntimeContext {
+        stable_bytes: stable.len(),
+        text,
+    }
 }
 
 fn render_required_skills(context: &RuntimeContextSections) -> String {
@@ -947,6 +1044,94 @@ mod tests {
                 .to_string()
                 .contains("schema injection"));
         }
+    }
+
+    fn runtime_prefix(
+        context: &RuntimeContextSections,
+        step: Option<&str>,
+        tools: &[Value],
+    ) -> (String, String, Option<Vec<Value>>) {
+        let session = hostile_session();
+        let bounded = build_bounded_runtime_input(RuntimePromptRequest {
+            context,
+            session: &session,
+            current_step: step,
+            tools: Some(tools),
+            mode: "execute",
+            project_root: Path::new("/workspace/project"),
+            tool_use_enforcement: true,
+            context_length: 2_400,
+        })
+        .expect("bounded input");
+        let typed = bounded.typed_messages().expect("typed messages");
+        let (stable, rest) = typed[0]
+            .split_reusable_prefix()
+            .expect("runtime prompt marks a reusable prefix");
+        (stable.to_string(), rest.to_string(), bounded.tools)
+    }
+
+    #[test]
+    fn changing_only_the_task_or_step_preserves_the_reusable_wire_prefix() {
+        let tools = hostile_tools();
+        let context = hostile_context();
+        let (stable, rest, wire_tools) = runtime_prefix(&context, Some("STEP_ONE"), &tools);
+        assert!(stable.contains("## Project Agent Guidelines"));
+        assert!(stable.contains("AGENTS_HEAD"));
+        assert!(stable.contains("PROJECT_DOC_00_HEAD"));
+        assert!(stable.contains("memory-00"));
+        assert!(!stable.contains("TASK_HEAD"));
+        assert!(!stable.contains("STEP_ONE"));
+        assert!(rest.starts_with("\n\n## Current Task"));
+        assert!(rest.contains("STEP_ONE"));
+
+        let mut changed_task = context.clone();
+        changed_task.task = format!("OTHER_TASK {} END", "different work ".repeat(300));
+        let (same_stable, changed_rest, same_tools) =
+            runtime_prefix(&changed_task, Some("STEP_TWO"), &tools);
+        assert_eq!(same_stable, stable);
+        assert_eq!(same_tools, wire_tools);
+        assert!(changed_rest.contains("OTHER_TASK"));
+        assert!(changed_rest.contains("STEP_TWO"));
+
+        let mut changed_agents = context.clone();
+        changed_agents.agents = context.agents.replace("AGENTS_HEAD", "AGENTS_EDITED");
+        let (refreshed, _, _) = runtime_prefix(&changed_agents, Some("STEP_ONE"), &tools);
+        assert_ne!(refreshed, stable);
+        assert!(refreshed.contains("AGENTS_EDITED"));
+
+        let mut changed_memory = context.clone();
+        changed_memory.memory[0].label = "memory-fresh".to_string();
+        let (refreshed, _, _) = runtime_prefix(&changed_memory, Some("STEP_ONE"), &tools);
+        assert_ne!(refreshed, stable);
+        assert!(refreshed.contains("memory-fresh"));
+
+        let mut changed_tools = tools.clone();
+        changed_tools[0]["function"]["description"] = json!("edited core tool");
+        let (_, _, refreshed_tools) = runtime_prefix(&context, Some("STEP_ONE"), &changed_tools);
+        assert_ne!(refreshed_tools, wire_tools);
+    }
+
+    #[test]
+    fn planning_prompt_marks_stable_prefix_before_goal_dependent_sections() {
+        let tools = hostile_tools();
+        let plan = |context: &RuntimeContextSections| {
+            let bounded = build_bounded_planning_input(PlanningPromptRequest {
+                context,
+                session: None,
+                goal: "plan the work",
+                tools: &tools,
+                context_length: 4_000,
+            })
+            .expect("planning input");
+            let typed = bounded.typed_messages().expect("typed");
+            let (stable, _) = typed[0].split_reusable_prefix().expect("prefix");
+            stable.to_string()
+        };
+        let context = hostile_context();
+        let mut other = context.clone();
+        other.task = "a different planning goal".to_string();
+        assert_eq!(plan(&context), plan(&other));
+        assert!(!plan(&context).contains("TASK_HEAD"));
     }
 
     #[test]

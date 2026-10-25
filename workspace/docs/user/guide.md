@@ -288,6 +288,7 @@ api_key = "replace-or-use-OPENAI_API_KEY"  # user configuration only
 api_keys = []                  # user configuration only
 api = "responses"              # responses | chat_completions; user configuration only
 reasoning_effort = "medium"    # optional: none|minimal|low|medium|high|xhigh|max
+prompt_cache = "auto"          # optional: auto (default) | extended | off
 # base_url = "https://api.openai.com/v1"   # user configuration only
 
 [agent]
@@ -452,6 +453,81 @@ exceeding either limit stops the request.
 profile; `execution.default_profile` selects the shell sandbox profile. Boundary
 network settings apply only to sandboxed terminal processes, not LLM HTTP, web tools,
 skill installation, or MCP child-process startup.
+
+#### Prompt caching
+
+nib orders each model request so reusable content comes first: fixed instructions,
+project agent guidelines, project references, the skill catalog, and profile
+memory precede the current task, plan step, attachments, workload snapshot, and
+compressed summary. Changing only the task or step keeps that prefix identical, so
+a provider can reuse its processing; changed guidelines, references, skills,
+memory, or tools change the prefix immediately. Cached input still counts toward
+`llm.context_length`, and compaction rules are unchanged.
+
+`llm.providers.<name>.prompt_cache` controls optional cache fields:
+
+- `auto` (default when omitted): direct Anthropic requests to the official
+  endpoint carry `cache_control` breakpoints on the last tool definition, the
+  stable system prefix, and the newest user turn, with the provider's 5-minute
+  retention. OpenAI-compatible providers and Gemini receive no extra fields and
+  rely on the provider's automatic caching. A custom Anthropic `base_url` receives
+  no cache fields.
+- `extended`: Anthropic only, official endpoint only; uses 1-hour retention, which
+  has a higher cache-write charge. Other providers reject it during configuration
+  validation.
+- `off`: nib sends no optional cache fields. This cannot disable a provider's own
+  implicit caching.
+
+Provider diagnostics in `nib doctor` show the effective `Prompt cache:` mapping.
+Reported cache reads and writes are usage evidence, not proof of savings.
+
+#### Model escalation
+
+nib can run most work on a cheaper model (the worker: the run's selected
+provider and model) and call a costlier model only when the work is stuck.
+Escalation is off unless you name an escalation model from your configured
+providers:
+
+```toml
+[agent.escalation]
+model = "gpt-5"          # exact model ID; omit to keep escalation off
+# provider = "openai"    # a configured llm.providers entry; defaults to the run's provider
+# max_per_run = 2        # escalations per run (0-16); 0 turns escalation off
+```
+
+An escalation starts in one of three ways:
+
+- the worker calls its bounded `ask_advice` step with one specific question;
+- three consecutive failed tool batches or rejected completions (open required
+  verification) in a run. Approval denials and local preflight failures (such as
+  worktree setup) do not count;
+- you run `/escalate [question]`, which also works while a run is active. The
+  request applies at the run's next safe point, or at the first worker turn of
+  your next request.
+
+The first escalation in a run is advice: the escalation model receives a bounded
+request (the goal, applicable instructions, the current plan step and its open
+verification obligations, recent observations, and the question), no tools, and
+at most 1,024 output tokens. The worker continues with that advice. Advice is not
+verification evidence and authorizes nothing. If failures or `/escalate` continue
+after advice, the next escalation is a takeover: the escalation model handles
+exactly one turn, through the same plan, tool approvals, sandbox, and
+verification gates, and then the worker continues. Each model change starts a
+fresh provider request rather than reusing the other model's continuation.
+
+Limits apply per run: at most `max_per_run` escalations (2 by default), and no
+further escalation once the escalation model has used 25% or more of the run's
+provider-reported model tokens (cache reads and writes included). A call without
+reported usage is counted as a call and makes the token share unknown rather than
+zero; the count limit still applies. Each escalation is reserved in the session
+before the call, so cancelling or resuming a run does not restore its allowance.
+Delegated subagents and runs with an explicit `--model` never escalate.
+
+The session records `escalation_dispatched`, `escalation_completed` (outcome,
+reported usage, and budget), and `escalation_skipped` (reason) events. Plain and
+full-screen output show the same `[escalation]` lines, `/status` shows the
+configuration and this session's escalations, and `nib doctor` shows whether
+escalation is on. nib does not choose models for you or estimate savings.
 
 #### OpenAI API mode
 
@@ -716,7 +792,10 @@ next-turn queue rule; `/help` remains available for immediate command discovery.
   reserve and headroom, contributions, occupancy versus cumulative provider usage,
   message and summary coverage, retained human intent, unresolved clarifications,
   selected skills, and the latest run's generation, tool, compression, and
-  repeated-question counters. Inspection is local and read-only, including while a
+  repeated-question counters. Usage lines show reported cache reads and cache
+  writes, a read ratio (cache reads divided by reported input; `n/a` when input is
+  zero or a count is unknown), and how many requests the cumulative totals cover.
+  Counts a provider did not report appear as `unknown`, never as zero. Inspection is local and read-only, including while a
   run is active or an approval/question owns the prompt (TUI: F2 then `/context`).
 - `/model` or `/model <name>` lists or selects a model.
 - `/mode [ask|accept-edits|plan|auto|policy|default]` shows or sets this session's
@@ -780,6 +859,9 @@ next-turn queue rule; `/help` remains available for immediate command discovery.
   provider. It may bypass the automatic usage threshold, but still respects the
   compression enabled switch, preserves every raw message, and reports the resulting
   budget or a truthful no-op/failure outcome.
+- `/escalate [question]` asks the configured escalation model for advice at the
+  next safe point (see [Model escalation](#model-escalation)); without an
+  escalation model it explains how to enable one and records nothing.
 - `/ps` lists a bounded projection of durable background work owned by the active
   session. `/stop` lists stoppable work and exact-ID guidance; `/stop <task-id>` requests
   cancellation of exactly one task only when that durable record belongs to the active
@@ -854,6 +936,7 @@ Parity matrix (same command/session effect in both renderers):
 | Transcript navigation | `PageUp`/`PageDown`; `Ctrl+End` follows tail | ordered printed transcript; no inferred viewport |
 | Path attachment | `@` completion, structured context | same `@path` mentions |
 | Compact context | `/compact`, streamed compression/reconciliation | same command and outcomes |
+| Model escalation | `/escalate [question]`, escalation activity rows | same command, `[escalation]` lines |
 | Background work | `/ps`; `/stop [task-id]` | same bounded list and exact-ID cancellation |
 
 Interaction state is shared by both renderers and is derived from the authoritative

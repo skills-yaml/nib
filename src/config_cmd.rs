@@ -114,7 +114,10 @@ fn is_provider_enum_path(path: &[String]) -> bool {
     path.len() == 4
         && path[0] == "llm"
         && path[1] == "providers"
-        && matches!(path[3].as_str(), "api" | "reasoning_effort")
+        && matches!(
+            path[3].as_str(),
+            "api" | "reasoning_effort" | "prompt_cache"
+        )
 }
 
 fn redact_credentials(config: &mut nib::config::NibConfig) {

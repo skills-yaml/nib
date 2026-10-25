@@ -217,21 +217,50 @@ Report uncertainty and task categories rather than relying on one aggregate scor
 
 ## Acceptance Criteria
 
-- [ ] Routing-disabled and explicitly pinned runs preserve existing selection behavior.
-- [ ] Ordinary tasks use the worker for planning and execution without a compulsory
-  costly planner, classifier, or reviewer.
-- [ ] Every costly invocation has an auditable trigger, bounded context, and reserved
-  allowance; advice and takeover are distinguishable outcomes.
-- [ ] Worker continuation after advice retains applicable instructions, plan identity,
-  and verification obligations; unsupported continuation reuse is rejected.
-- [ ] Repeated failure, budget exhaustion, cancellation, and restart cannot exceed
-  configured dispatch limits or silently reset shared delegated allowances.
-- [ ] Missing pricing or usage produces explicit unknown/estimated evidence, never
-  a false zero-cost or hard-ceiling guarantee.
-- [ ] Model changes cannot bypass tool permissions, isolation, or verified merge gates.
-- [ ] Plain/TUI controls and persisted evidence agree about role, reason, and outcome.
+- [x] Routing-disabled and explicitly pinned runs preserve existing selection behavior.
+  Evidence: `routing_disabled_runs_keep_the_worker_and_record_no_escalation`,
+  `pinned_runs_do_not_escalate`, `escalation_is_off_unless_configured_allowed_and_unpinned`.
+- [x] Ordinary tasks use the worker for planning and execution without a compulsory
+  costly planner, classifier, or reviewer. Evidence: planning and every turn use the
+  worker; the escalation model is called only on the three triggers (all loop tests
+  assert per-request models).
+- [x] Every costly invocation has an auditable trigger, bounded context, and reserved
+  allowance; advice and takeover are distinguishable outcomes. Evidence:
+  `escalation_dispatched` (trigger, kind, model, plan/step, reservation) is written
+  before the call and `escalation_completed` after it;
+  `advice_context_is_bounded_and_keeps_plan_obligations_and_instructions`,
+  `repeated_failures_escalate_to_advice_then_a_gated_one_turn_takeover`.
+- [x] Worker continuation after advice retains applicable instructions, plan identity,
+  and verification obligations; unsupported continuation reuse is rejected. Evidence:
+  advice is rebuilt into the same bound plan context; provider continuation is
+  abandoned (`reason: model_escalation`) before any escalation and discarded after a
+  takeover, so no request replays another model's continuation
+  (`replays_function_calls` assertions in the repeated-failure test).
+- [x] Repeated failure, budget exhaustion, cancellation, and restart cannot exceed
+  configured dispatch limits or silently reset shared delegated allowances. Evidence:
+  `budget_admits_until_the_dispatch_limit`,
+  `restored_budget_keeps_interrupted_reservations_and_ignores_other_runs`,
+  `worker_advice_is_bounded_audited_and_the_worker_continues` (limit refusal);
+  delegated children run with `escalation: false`.
+- [x] Missing pricing or usage produces explicit unknown/estimated evidence, never
+  a false zero-cost or hard-ceiling guarantee. Evidence: `usage_available: false`,
+  `usage_basis: calls`, and a null token share
+  (`budget_enforces_the_token_share_only_on_reported_usage`); no monetary ceiling is
+  offered.
+- [x] Model changes cannot bypass tool permissions, isolation, or verified merge gates.
+  Evidence: the takeover's tool proposal goes through the unchanged approval path and
+  is denied without side effects in
+  `repeated_failures_escalate_to_advice_then_a_gated_one_turn_takeover`; advice is
+  offered no tools.
+- [x] Plain/TUI controls and persisted evidence agree about role, reason, and outcome.
+  Evidence: both renderers format `StreamEvent::Escalation` with the shared
+  `escalation_status_text` (`plain_and_tui_share_the_escalation_status_text`);
+  `/escalate` and `/status` come from the shared command registry
+  (`escalate_command_records_a_request_only_when_configured`).
 - [ ] A held-out comparison meets the predeclared savings, costly-use, quality, and
   latency targets; unsupported workload categories remain explicitly unqualified.
+  Not achievable offline: paid calls are not authorized (Decision 4). Remains an open
+  live qualification item.
 
 ## Validation Gates
 
@@ -304,6 +333,63 @@ the scoped implementation plan and validation policy.
 7. Budget units: provider-reported tokens, with escalation calls counted
    when usage is missing; prompt-cache reads and writes use the usage fields
    that FT-022 adds.
+
+## Implementation Plan
+
+Delivered on branch `feat/ft021-model-escalation`, built on FT-022:
+
+1. Configuration: `agent.escalation` (`model`, optional `provider`, `max_per_run`,
+   default 2, at most 16), validated with the normal configuration path and omitted
+   from saved configuration while default.
+2. Runtime (`src/agent/loop/escalation.rs`): per-run `EscalationBudget` restored from
+   session events, the three triggers, bounded advice requests (no tools, 1,024 output
+   tokens), the one-turn takeover, and audit events.
+3. Loop wiring (`inner.rs`, `inner_exec.rs`): dispatch at the context boundary before
+   a worker turn, the `ask_advice` step handled outside the tool executor, failure
+   observation after tool batches and rejected completions, and per-turn usage.
+4. Controls and display: `/escalate [question]` (allowed while a run is active),
+   `/status` and `nib doctor` lines, `StreamEvent::Escalation` in plain and TUI.
+5. Docs: user guide "Model escalation"; focused gate `task test:model-escalation`.
+
+## Implementation Notes (2026-10-24)
+
+- Worker = the run's provider/model. The escalation client is the configured
+  provider entry with its model replaced; no new provider or data path is added.
+  A run with an explicit model pin, plan-only runs, and delegated children never
+  escalate.
+- Triggers: `ask_advice` (always advice); three consecutive failed tool batches or
+  completions rejected for open required verification (approval denials and local
+  preflight failures do not count); `/escalate` (a session event the current run
+  takes at its next context boundary, or the next run at its first worker turn).
+  The first escalation in a run is advice; a later failure or user trigger after
+  advice is a one-turn takeover. A pending escalation overrides the identical-batch
+  stall stop while the budget allows; once spent, the stall stop applies as before.
+- Budget: the count limit, then the 25% token share computed from provider-reported
+  `total_tokens` (which include FT-022 cache reads and writes; the breakdown is
+  recorded). The share is checked before each dispatch, so a single escalation can
+  move the share past 25%, after which no further escalation is dispatched. A call
+  without usage is counted and makes the share unknown. Worker usage counts
+  execution turns; planning and compression usage is not attributed, which makes the
+  share check stricter, not looser.
+- Records: `escalation_dispatched` (reserved before the call), `escalation_completed`,
+  `escalation_skipped`, `escalation_requested`, `escalation_unavailable`; advice and
+  takeover usage also appear in `context_usage` with a `model_role`, so session
+  totals include them. Advice text is stored as model output followed by a runtime
+  continuation, preserving the transcript role order and human provenance.
+
+## Validation Notes (2026-10-24)
+
+- `task test:model-escalation`: 20 offline tests pass (scripted Responses provider;
+  no paid calls).
+- Focused suites for `agent::`, `interactive::`, `config::`, `context::`, `chat::`,
+  `tui::`, `session::`, `llm::`, `integrations::`, `tools::delegation`, and
+  `tests/doctor_cli.rs` pass; three lease/timing tests that failed only under
+  parallel load pass serially and without this change.
+- `task check` passes. `task docs:check`: link checks pass and this spec now has its
+  implementation plan heading; the required-fields check still fails on the T082,
+  T087, and FT-022 development specs at the base commit (outside this lane).
+- Not run by this lane per coordination: `task verify`, full `task test`, and the
+  interactive release check.
 
 ## Prior Memory Notes
 

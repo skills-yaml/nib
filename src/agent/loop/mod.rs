@@ -35,6 +35,7 @@ use tokio::sync::{mpsc, mpsc::Sender, Notify};
 
 mod discussion;
 mod entry;
+mod escalation;
 mod finish;
 mod inner;
 mod question_forms;
@@ -45,6 +46,7 @@ mod verify;
 mod workspace_record;
 
 pub(crate) use entry::*;
+pub(crate) use escalation::*;
 pub(crate) use finish::*;
 pub(crate) use inner::*;
 pub(crate) use support::*;

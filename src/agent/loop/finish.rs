@@ -105,7 +105,7 @@ pub(crate) async fn run_answer_only_route(
     store
         .record_event(session_id, "context_bounded", details)
         .map_err(|error| error.to_string())?;
-    let typed_messages = match crate::llm::LlmMessage::from_openai_values(&bounded.messages) {
+    let typed_messages = match bounded.typed_messages() {
         Ok(messages) => messages,
         Err(error) => {
             return finish_answer_only_failure(

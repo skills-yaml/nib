@@ -1120,6 +1120,7 @@ pub fn run_subagent_worker(worktree: &Path, subagent_id: &str) -> Result<(), Str
         max_steps: request.max_steps,
         auto_approve: false,
         approval_handler: Some(Arc::new(NonInteractiveSubagentApproval)),
+        escalation: false,
         ..Default::default()
     };
     let session_lock_policy = crate::session::SessionStore::current_lock_policy();
