@@ -332,6 +332,60 @@ impl SessionStore {
         &self.sessions_dir
     }
 
+    /// A store opened on the user-home session directory when this one was
+    /// imported by the state migration and its legacy path is gone.
+    ///
+    /// `None` means this store is still the live directory: the path exists,
+    /// or no completed import is recorded. The caller then keeps today's
+    /// fail-closed checks. The returned store is opened before any lock or
+    /// publication, and the caller runs the body on it once.
+    fn relocated_store(&self) -> Result<Option<Self>, SessionError> {
+        let Some(moved) = self.migrated_sessions_dir()? else {
+            return Ok(None);
+        };
+        let mut store = Self::at_dir(moved);
+        store.sensitive_values = Arc::clone(&self.sensitive_values);
+        store.lock_deadline = self.lock_deadline;
+        store.lock_timeout = self.lock_timeout;
+        if let Some(error) = store.initialization_error.clone() {
+            return Err(SessionError::InvalidMutation(error));
+        }
+        if std::fs::symlink_metadata(&store.sessions_dir).is_err() {
+            return Err(SessionError::InvalidMutation(
+                "session store moved more than once".to_string(),
+            ));
+        }
+        Ok(Some(store))
+    }
+
+    fn migrated_sessions_dir(&self) -> Result<Option<PathBuf>, SessionError> {
+        if std::fs::symlink_metadata(&self.sessions_dir).is_ok() {
+            return Ok(None);
+        }
+        let Some(moved) = crate::state_migration::moved_sessions_dir(&self.sessions_dir) else {
+            return Ok(None);
+        };
+        if moved == self.sessions_dir {
+            return Ok(None);
+        }
+        match std::fs::symlink_metadata(&moved) {
+            Ok(_) => {
+                crate::fs_security::verify_directory_without_symlinks(&moved).map_err(|error| {
+                    SessionError::InvalidMutation(format!(
+                        "migrated session directory is unsafe: {error}"
+                    ))
+                })?
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(SessionError::InvalidMutation(format!(
+                    "migrated session directory is unsafe: {error}"
+                )))
+            }
+        }
+        Ok(Some(moved))
+    }
+
     /// Whether the session directory `sessions_dir` holds session `id`, in
     /// the session database or as a JSON file, without creating anything.
     pub fn session_exists_at(sessions_dir: &Path, id: &str) -> Result<bool, SessionError> {
@@ -366,6 +420,9 @@ impl SessionStore {
     }
 
     pub(crate) fn try_acquire_run_lease(&self, id: &str) -> Result<SessionRunLease, SessionError> {
+        if let Some(store) = self.relocated_store()? {
+            return store.try_acquire_run_lease(id);
+        }
         self.validate_session_id(id)?;
         self.verify_directory_binding()?;
         let lock_path = self.sessions_dir.join(format!(".session-run-{id}.lock"));
@@ -715,6 +772,9 @@ impl SessionStore {
     /// Strictly loads a session. Missing files are distinct from unreadable, corrupt,
     /// or invariant-violating files so callers cannot accidentally recreate over them.
     pub fn load_result(&self, id: &str) -> Result<Option<Session>, SessionError> {
+        if let Some(store) = self.relocated_store()? {
+            return store.load_result(id);
+        }
         self.with_session_lock(id, |directory| {
             Ok(self
                 .load_opened_unlocked(directory, id)?
@@ -727,6 +787,9 @@ impl SessionStore {
         id: &str,
         deadline: Instant,
     ) -> Result<Option<Session>, SessionError> {
+        if let Some(store) = self.relocated_store()? {
+            return store.load_result_with_deadline(id, deadline);
+        }
         self.with_session_lock_until(id, deadline, |directory| {
             Ok(self
                 .load_opened_unlocked(directory, id)?
@@ -738,6 +801,9 @@ impl SessionStore {
         &self,
         id: &str,
     ) -> Result<Option<(Session, SessionRecordMetadata)>, SessionError> {
+        if let Some(store) = self.relocated_store()? {
+            return store.load_result_with_metadata(id);
+        }
         self.with_session_lock(id, |directory| {
             Ok(self
                 .load_opened_unlocked(directory, id)?
@@ -765,6 +831,9 @@ impl SessionStore {
         &self,
         id: impl Into<String>,
     ) -> Result<Session, SessionError> {
+        if let Some(store) = self.relocated_store()? {
+            return store.try_create_session_with_id(id);
+        }
         let id = id.into();
         self.with_session_lock(&id, |directory| {
             if let Some(opened) = self.load_opened_unlocked(directory, &id)? {
@@ -776,11 +845,29 @@ impl SessionStore {
         })
     }
 
+    /// Runs unpublished preparation on the imported store when this one was
+    /// moved. `None` means the body below must run on `self`, once.
+    fn relocated_unpublished(
+        &self,
+        session: &Session,
+        external_guard: &mut impl FnMut() -> Result<(), String>,
+    ) -> Result<Option<SessionHandle>, SessionError> {
+        let Some(store) = self.relocated_store()? else {
+            return Ok(None);
+        };
+        store
+            .create_unpublished_session_with_receipt_and_guard(session, external_guard)
+            .map(Some)
+    }
+
     pub(crate) fn create_unpublished_session_with_receipt_and_guard(
         &self,
         session: &Session,
         external_guard: &mut impl FnMut() -> Result<(), String>,
     ) -> Result<SessionHandle, SessionError> {
+        if let Some(handle) = self.relocated_unpublished(session, external_guard)? {
+            return Ok(handle);
+        }
         let id = session.id.as_str();
         self.validate_session_id(id)?;
         self.verify_directory_binding()?;
@@ -1100,6 +1187,9 @@ impl SessionStore {
     }
 
     pub fn save(&self, session: &mut Session) -> Result<(), SessionError> {
+        if let Some(store) = self.relocated_store()? {
+            return store.save(session);
+        }
         match self.lock_deadline() {
             Some(deadline) => self.with_skill_usage_lock_until(deadline, || {
                 self.save_under_skill_usage_lock_with_deadline(session, Some(deadline))
@@ -1162,6 +1252,9 @@ impl SessionStore {
         id: &str,
         update: impl FnOnce(&mut Session) -> Result<T, SessionError>,
     ) -> Result<T, SessionError> {
+        if let Some(store) = self.relocated_store()? {
+            return store.update_session(id, update);
+        }
         match self.lock_deadline() {
             Some(deadline) => self.update_session_with_deadline(id, deadline, update),
             None => self
@@ -1175,6 +1268,9 @@ impl SessionStore {
         deadline: Instant,
         update: impl FnOnce(&mut Session) -> Result<T, SessionError>,
     ) -> Result<T, SessionError> {
+        if let Some(store) = self.relocated_store()? {
+            return store.update_session_with_deadline(id, deadline, update);
+        }
         self.with_skill_usage_lock_until(deadline, || {
             self.update_session_under_skill_usage_lock_with_deadline(id, Some(deadline), update)
         })
@@ -1222,6 +1318,9 @@ impl SessionStore {
         id: &str,
         update: impl FnOnce(&mut Session) -> Result<T, SessionError>,
     ) -> Result<T, SessionError> {
+        if let Some(store) = self.relocated_store()? {
+            return store.update_or_create_session(id, update);
+        }
         match self.lock_deadline() {
             Some(deadline) => self.with_skill_usage_lock_until(deadline, || {
                 self.update_or_create_session_under_skill_usage_lock_with_deadline(
@@ -1242,6 +1341,9 @@ impl SessionStore {
         deadline: Instant,
         update: impl FnOnce(&mut Session) -> Result<T, SessionError>,
     ) -> Result<T, SessionError> {
+        if let Some(store) = self.relocated_store()? {
+            return store.update_or_create_session_with_deadline(id, deadline, update);
+        }
         self.with_skill_usage_lock_until(deadline, || {
             self.update_or_create_session_under_skill_usage_lock_with_deadline(
                 id,
@@ -1298,6 +1400,9 @@ impl SessionStore {
         should_delete: impl FnOnce(&Session, &SessionRecordMetadata) -> bool,
         before_delete: impl FnOnce() -> Result<(), SessionError>,
     ) -> Result<SessionDeleteOutcome, SessionError> {
+        if let Some(store) = self.relocated_store()? {
+            return store.delete_if_with_commit_check(id, should_delete, before_delete);
+        }
         let deadline = self.lock_deadline();
         let operation = || {
             let session_operation = |directory: &crate::daemons::state::StableDirectory| {
@@ -1444,6 +1549,16 @@ impl SessionStore {
         legacy_details: serde_json::Value,
         deadline: Instant,
     ) -> Result<(), SessionError> {
+        if let Some(store) = self.relocated_store()? {
+            return store.record_event_once_with_deadline(
+                id,
+                kind,
+                reconciliation_id,
+                details,
+                legacy_details,
+                deadline,
+            );
+        }
         self.with_skill_usage_lock_until(deadline, || {
             self.with_session_lock_until(id, deadline, |directory| {
                 let opened = self.load_opened_unlocked(directory, id)?;
@@ -1522,6 +1637,9 @@ impl SessionStore {
         skill_name: impl Into<String>,
         reason: Option<String>,
     ) -> Result<SkillUsageRecord, SessionError> {
+        if let Some(store) = self.relocated_store()? {
+            return store.record_skill_usage(id, skill_name, reason);
+        }
         let skill_name = skill_name.into();
         crate::context::skills::canonical_skill_id(&skill_name).map_err(|error| {
             SessionError::InvalidMutation(format!("invalid skill name: {error}"))
@@ -1559,6 +1677,14 @@ impl SessionStore {
         validate_contents: bool,
         deadline: Option<Instant>,
     ) -> Result<Vec<String>, SessionError> {
+        if let Some(store) = self.relocated_store()? {
+            return store.list_entries_result(
+                max_sessions,
+                max_total_bytes,
+                validate_contents,
+                deadline,
+            );
+        }
         self.verify_directory_binding()?;
         if let Some(store) = &self.database {
             return self.list_rows(
@@ -1730,6 +1856,9 @@ impl SessionStore {
     }
 
     pub fn list_result(&self) -> Result<Vec<String>, SessionError> {
+        if let Some(store) = self.relocated_store()? {
+            return store.list_result();
+        }
         let deadline = self.lock_deadline();
         let list = || self.list_entries_result(MAX_LISTED_SESSIONS, None, true, deadline);
         match deadline {

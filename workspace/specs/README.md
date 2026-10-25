@@ -33,6 +33,7 @@ new work requires verified main merge. See [SDLC](../instructions/tech/sdlc.md).
 <!-- SPEC-CATALOG:START -->
 | Spec | Primary feature | State | Status rationale |
 | --- | --- | --- | --- |
+| [T089](development/architecture/T089_long_lived_store_reresolve.md) | architecture | development | Started 2026-10-25 as the T082 follow-up: a held store re-resolves after migration instead of failing its next write; joins applied minor 0.7.0; not yet integrated into development. |
 | [T087](development/build-quality/T087_dead_code_and_test_cleanup.md) | build-quality | development | Started 2026-10-22 under the user-requested goal: zero-test Task filters, unused exports, obsolete context/skill tests and the flaky editor smoke cases; shared minor 0.6.0. |
 | [T088](test/llm-providers/T088_all_provider_model_selection.md) | llm-providers | test | Confirmed shared development merge 76ed1bf via PR76 on 2026-10-25, pinned to independently reviewed and native/hosted-qualified 0d06470 with identical trees; minor 0.7.0; main delivery and publication remain separate. |
 | [T086](test/interactive/T086_codex_style_startup_screen.md) | interactive | test | Confirmed shared development merge fc10185 via PR68 (pinned to verified ff70dee) on 2026-10-22 after independent exact review and Linux/macOS CI; patch 0.5.2; main delivery and publication remain separate. |
@@ -153,7 +154,7 @@ and Linux/macOS/Windows CI 37419726793 passed on that exact revision. Question
 forms, conversational recovery, Esc interruption and proposal chat are delivered;
 `/plan` and `/questions` are removed from interactive commands. See
 [T061](done/interactive/T061_question_form.md) for criterion evidence and actual events.
-Current catalog: **78 done, 12 test, 5 development, and 0 backlog**. Publication is separate.
+Current catalog: **78 done, 12 test, 6 development, and 0 backlog**. Publication is separate.
 
 The 2026-07-15 audit inspected all 27 specs that had claimed completion. Unsupported
 claims moved through `development/`; missing feasible behavior was implemented and
