@@ -1,8 +1,8 @@
 # T082: User-Home Runtime State and SQLite Sessions
 
-**Status:** Development. Started on 2026-10-22 after the user accepted every
-recommended decision below.
-State: development
+**Status:** Test. Started on 2026-10-22 under the user-requested goal; integrated
+into shared development on 2026-10-25 via PR74 (f8861c5).
+State: test
 Primary Feature: architecture
 
 ## Problem and Authority
@@ -757,6 +757,26 @@ blocking or major findings. Resolutions:
 
 ## Memory Impact
 
-Status: pending
-Rationale: The decisions recorded above are durable; they are written to project
-memory when this spec is verified.
+Status: updated
+Rationale: The accepted decisions (legacy worktrees, session document plus append-only
+rows, user-level approvals and trust, bundled rusqlite, `~/.nib` with
+`NIB_HOME`) and the upgrade note are recorded in
+[workspace/agents/memory/decisions.md](../../../agents/memory/decisions.md)
+and [workspace/agents/memory/changelog.md](../../../agents/memory/changelog.md).
+
+## Integration Evidence
+
+Revision: f8861c5eef05d17a56e85b9f7c67cd382a0b16e8
+Outcome: passed
+
+Merged into shared development on 2026-10-25 via PR74, pinned to head
+eca593c after full local `task verify`
+(NIB_REQUIRE_BWRAP_TESTS=1), the interactive release smoke and Linux/macOS CI.
+The reviewed head was 7282ede. The
+later merges drop `Curator::new`/`new_with_policy` and `SessionStore::delete_if`
+(removed by T087; the database tests call `delete_if_with_commit_check`), make
+T087's editor-smoke goal lookup export sessions from `nib.db` first, and keep
+both sides of the user-guide provider example; `task verify`, both release
+smokes and CI reran on eca593c.
+The merged tree equals the verified head. Main delivery and publication remain
+separate.

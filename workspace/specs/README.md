@@ -33,16 +33,16 @@ new work requires verified main merge. See [SDLC](../instructions/tech/sdlc.md).
 <!-- SPEC-CATALOG:START -->
 | Spec | Primary feature | State | Status rationale |
 | --- | --- | --- | --- |
-| [T087](development/build-quality/T087_dead_code_and_test_cleanup.md) | build-quality | development | Started 2026-10-22 under the user-requested goal: zero-test Task filters, unused exports, obsolete context/skill tests and the flaky editor smoke cases; shared minor 0.6.0. |
+| [T087](test/build-quality/T087_dead_code_and_test_cleanup.md) | build-quality | test | Confirmed shared development merge 89156f6 via PR71 (pinned to reviewed d3dc959) on 2026-10-25 after full task verify and Linux/macOS CI; shared minor 0.6.0; main delivery and publication remain separate. |
 | [T086](test/interactive/T086_codex_style_startup_screen.md) | interactive | test | Confirmed shared development merge fc10185 via PR68 (pinned to verified ff70dee) on 2026-10-22 after independent exact review and Linux/macOS CI; patch 0.5.2; main delivery and publication remain separate. |
 | [T083](test/skills-mcp/T083_progressive_skill_management.md) | skills-mcp | test | Confirmed shared development push at f83fc3874669e1ca1258381006c7f7434cd6dab6 after independent review and complete native verification; main delivery remains pending. |
 | [T085](test/interactive/T085_claude_style_waiting_indicator.md) | interactive | test | Confirmed shared development push93151e0 after exact review and full native task verify; main merge and publication remain separate. |
 | [T084](test/interactive/T084_codex_keymap_alignment.md) | interactive | test | Confirmed shared development merge 252c62b via PR58 after exact review and Linux/macOS CI38363488692; main delivery and publication remain separate. |
-| [FT-021](development/model-routing/ft_021_cost_controlled_model_escalation.md) | model-routing | development | Started 2026-10-22 under the user-requested goal with agent-picked defaults (escalation off unless configured, at most 2 per run); shared minor 0.6.0; offline evaluation only, live measurement needs paid calls. |
-| [FT-022](development/prompt-caching/ft_022_provider_prompt_caching.md) | prompt-caching | development | Started 2026-10-22 under the user-requested goal with agent-picked defaults (Anthropic and OpenAI first, short retention on by default); shared minor 0.6.0; offline evaluation only. |
+| [FT-021](test/model-routing/ft_021_cost_controlled_model_escalation.md) | model-routing | test | Confirmed shared development merge 272c18e via PR73 (pinned to verified afda4bd) on 2026-10-25 after review, full task verify and Linux/macOS CI; shared minor 0.6.0; live evaluation needs paid calls; main delivery remains separate. |
+| [FT-022](test/prompt-caching/ft_022_provider_prompt_caching.md) | prompt-caching | test | Confirmed shared development merge f8e30c0 via PR72 (pinned to verified d13711e) on 2026-10-25 after review, full task verify and Linux/macOS CI; shared minor 0.6.0; live savings measurement needs paid calls; main delivery remains separate. |
 | [T080](test/tools-sandbox/T080_workspace_sandbox_and_permission_modes.md) | tools-sandbox | test | All phases integrated into shared development after independent review and full native gates: phase 1 PR52 (045e0e2), 2a PR54 (21ccf1d), 2b PR55 (6e14f30), 3 PR56 (8c0eabb), 4 PR57 (2dd4591), 5a/5b PR61 (7b6d7e7), 5c PR63 (cafca21), 5d PR65 (82aadb7), 6 PR67 (fb54e71, 2026-10-22); member of released 0.4.0, later phases ship in 0.5.2; main delivery and publication remain separate. |
 | [T081](test/agent-runtime/T081_clear_interrupted_plans.md) | agent-runtime | test | Confirmed shared development integration 90e49be0b90df60371d23eb2344378c173662fde (PR53) on 2026-10-09T08:29:15Z after three independent review rounds and fresh full native gates on the exact candidate; shared minor 0.4.0; main delivery and publication separate. |
-| [T082](development/architecture/T082_user_home_runtime_state_and_sqlite_sessions.md) | architecture | development | Started 2026-10-22 after the user accepted all five recommended decisions, including the scoped backend_rust.md amendment for bundled rusqlite; shared minor 0.6.0. |
+| [T082](test/architecture/T082_user_home_runtime_state_and_sqlite_sessions.md) | architecture | test | Confirmed shared development merge f8861c5 via PR74 (pinned to verified eca593c) on 2026-10-25 after review, full task verify, both release smokes and Linux/macOS CI; shared minor 0.6.0; Windows verification awaits main delivery. |
 | [T061](done/interactive/T061_question_form.md) | interactive | done | Verified main delivery a3b99632ae8cb452d5bfaff5555a3728999e8ba5 on 2026-10-06 at 06:40:26 UTC follows actual development integration, independent acceptance/review and exact native/all-platform CI 37419726793; acceptance, catalog, versions and memory reconciled; publication separate. |
 | [T067](done/interactive/T067_question_form_runtime_implementation.md) | interactive | done | Verified main delivery a3b99632ae8cb452d5bfaff5555a3728999e8ba5 on 2026-10-06 at 06:40:26 UTC follows actual development integration, independent acceptance/review and exact native/all-platform CI 37419726793; acceptance, catalog, versions and memory reconciled; publication separate. |
 | [T073](test/llm-providers/T073_provider_specific_model_selection.md) | llm-providers | test | Confirmed shared development integration 81c37a1908ec1032809e97cdf0b0b39d5253603b on 2026-10-08T17:02:18Z after independent exact review and fresh full native gates; shared minor 0.4.0 with T080; T073 supersedes earlier retention contracts; main delivery and publication separate. |
@@ -152,7 +152,7 @@ and Linux/macOS/Windows CI 37419726793 passed on that exact revision. Question
 forms, conversational recovery, Esc interruption and proposal chat are delivered;
 `/plan` and `/questions` are removed from interactive commands. See
 [T061](done/interactive/T061_question_form.md) for criterion evidence and actual events.
-Current catalog: **78 done, 7 test (T069-T073, T080, T086), 5 development (T023, T082, T087, FT-021, FT-022), and 0 backlog**. Publication is separate.
+Current catalog: **78 done, 11 test (T069-T073, T080, T082, T086, T087, FT-021, FT-022), 1 development (T023), and 0 backlog**. Publication is separate.
 
 The 2026-07-15 audit inspected all 27 specs that had claimed completion. Unsupported
 claims moved through `development/`; missing feasible behavior was implemented and
@@ -262,11 +262,11 @@ work or narrower guarantees.
 
 ### Feature specs
 
-- [FT-022: Provider Prompt Caching](development/prompt-caching/ft_022_provider_prompt_caching.md)
+- [FT-022: Provider Prompt Caching](test/prompt-caching/ft_022_provider_prompt_caching.md)
   — backlog proposal for stable request prefixes, opt-in provider cache controls,
   and cache-read/write evidence; coverage, retention, and evaluation targets remain
   open before development.
-- [FT-021: Cost-Controlled Model Escalation](development/model-routing/ft_021_cost_controlled_model_escalation.md)
+- [FT-021: Cost-Controlled Model Escalation](test/model-routing/ft_021_cost_controlled_model_escalation.md)
   — backlog proposal for mostly cheaper/open-weight execution and bounded costly
   assistance; hosting, budget, and quality targets remain open before development.
 - [FT-001: Basic Agent Tools](done/agent-runtime/ft_001_basic_agent_tools.md)

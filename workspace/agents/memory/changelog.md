@@ -913,3 +913,16 @@ Content:
 
 Recorded the user's Codex-style startup screen preference, keeping the Session
 and Keys hints, in preferences.md.
+
+## 2026-10-25 - Goal decisions and integration
+
+- Type: changelog
+- Source: T082, T087, FT-021, FT-022
+- Confidence: high
+- Review: independent exact-candidate review before delivery
+- Supersedes: none
+
+Content:
+
+Recorded the T082, FT-021 and FT-022 decisions in decisions.md, and the
+focused-test guard and the 0.6.0 development integration in facts.md.

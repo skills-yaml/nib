@@ -892,3 +892,62 @@ stays the agent mode) and `--sandbox`, and prompts only when stdin can
 answer (a terminal or a pipe); with stdin closed or `/dev/null` every prompt
 is an immediate denial. The D4 network
 default (spec: on; shipped: `restricted`) is left unchanged as an open point.
+
+## 2026-10-22 - T082: user-home runtime state and SQLite sessions
+
+- Type: decision
+- Source: T082 (Decisions 2026-10-22), accepted by the user
+- Confidence: high
+- Review: independent exact-candidate review before delivery
+- Supersedes: per-project `<project>/.nib` runtime state and JSON session files
+
+Content:
+
+Runtime state lives in `~/.nib` on every platform (`NIB_HOME` overrides the
+directory). Sessions are stored in a bundled-SQLite `nib.db` (`rusqlite` with
+the `bundled` feature, recorded in the governed `backend_rust.md` under a
+scoped user approval) as one JSON document per session plus append-only
+message and event rows. Approvals, trust, credentials, endpoints, the
+transport and the sandbox level are user-level per project
+(`~/.nib/projects/<key>/config.toml`); project `.nib/config.toml` holds
+preferences only, and preferences that set user-only values are rejected.
+Existing worktrees under `<project>/.nib/worktrees` stay as manageable
+legacy; new ones go to the user home. Upgrading users must stop older nib
+processes first, or an idle pre-T082 process can split the sessions
+directory; the release note must say so.
+
+## 2026-10-22 - FT-021: cost-controlled model escalation defaults
+
+- Type: decision
+- Source: FT-021 (Decisions 2026-10-22); the user delegated the choice to the agent
+- Confidence: medium
+- Review: independent exact-candidate review before delivery
+- Supersedes: none
+
+Content:
+
+Escalation is off unless the user configures an escalation model; nib picks
+no model and adds no provider path. Defaults: at most 2 escalations per run
+and at most 25% of a run's provider-reported model tokens on the escalation
+model. Triggers are the worker's bounded advice request, 3 consecutive failed
+tool calls or verifications, or `/escalate`. Each escalation is an advice
+turn first; a takeover is limited to one turn. Savings and quality are not yet
+measured live because paid calls were not authorized.
+
+## 2026-10-22 - FT-022: provider prompt caching defaults
+
+- Type: decision
+- Source: FT-022 (Decisions 2026-10-22); the user delegated the choice to the agent
+- Confidence: medium
+- Review: independent exact-candidate review before delivery
+- Supersedes: none
+
+Content:
+
+Anthropic (explicit `cache_control` breakpoints on the stable system, tool and
+instruction prefix) and OpenAI-compatible providers (stable prefix ordering
+and reported cached tokens) are covered first; other providers get stable
+prefix ordering only. `prompt_cache = "auto"` (default, the provider's short
+retention), `"extended"` (opt-in longer retention) or `"off"`. Model usage
+carries cache-read and cache-write token counts, which FT-021's budget uses.
+Live savings measurement stays open because paid calls were not authorized.

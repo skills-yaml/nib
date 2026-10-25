@@ -554,3 +554,34 @@ Progressive skill management is integrated into shared development alongside
 T080 permission modes and T081 interrupted-plan recovery. The remote branch was
 re-read after the normal push. T083 is in test, sharing the already-applied
 0.4.0 release; main delivery and publication remain separate.
+
+## 2026-10-25 - Focused Task test commands fail on zero tests
+
+- Type: fact
+- Source: T087; confirmed again when FT-021 and FT-022 integrated
+- Confidence: high
+- Review: independent exact-candidate review and full native task verify
+
+Content:
+
+Every focused `cargo test` command in `Taskfile.yml` must run through
+`{{.FOCUSED_TEST}}` with `deps: [test:focused-runner]`
+(`examples/focused_test.rs`), which fails when a filter selects zero tests.
+`task_contract_focused_test_commands_fail_on_empty_selections` in
+`tests/installers.rs` rejects any task that calls `cargo test` directly,
+except the full suite and the `--no-run` build, so new focused tasks must use
+the guard.
+
+## 2026-10-25 - Shared minor 0.6.0 integrated into development
+
+- Type: fact
+- Source: PR71 89156f6, PR72 f8e30c0, PR73 272c18e, PR74 f8861c5
+- Confidence: high
+- Review: verified heads, full native task verify and Linux/macOS CI
+
+Content:
+
+T087, FT-022, FT-021 and T082 are integrated into shared development under
+the shared minor 0.6.0 and are in test. Windows verification of T082 (bundled
+SQLite and the PowerShell smoke) waits for delivery to main; main delivery
+and publication remain separate.

@@ -1,9 +1,9 @@
 # FT-021: Cost-Controlled Model Escalation
 
-**Status:** Development. Started on 2026-10-22 under a user-requested multi-agent goal;
-the user delegated the open decisions to the agent ("you pick").
+**Status:** Test. Started on 2026-10-22 under the user-requested goal; integrated
+into shared development on 2026-10-25 via PR73 (272c18e).
 
-State: development
+State: test
 Primary Feature: model-routing
 
 ## Summary
@@ -407,6 +407,24 @@ is approved, without storing credentials or transient task traces.
 
 ## Memory Impact
 
-Status: pending
-Rationale: The decisions recorded above are durable; they are written to project
-memory when this spec is verified.
+Status: updated
+Rationale: The agent-picked defaults (off unless configured, at most 2 per run, 25%
+token share, the three triggers, advice before a one-turn takeover) are
+recorded in [workspace/agents/memory/decisions.md](../../../agents/memory/decisions.md)
+and [workspace/agents/memory/changelog.md](../../../agents/memory/changelog.md).
+Live evaluation stays open because paid calls are not authorized.
+
+## Integration Evidence
+
+Revision: 272c18e115fce13362812e7ba74e7e984b07e6f2
+Outcome: passed
+
+Merged into shared development on 2026-10-25 via PR73, pinned to head
+afda4bd after full local `task verify`
+(NIB_REQUIRE_BWRAP_TESTS=1), the interactive release smoke and Linux/macOS CI.
+The reviewed head was c25dce5. The
+later commits merge the updated FT-022 branch and route
+`test:model-escalation` through T087's focused-test guard; the full gates
+and CI reran on afda4bd.
+The merged tree equals the verified head. Main delivery and publication remain
+separate.
