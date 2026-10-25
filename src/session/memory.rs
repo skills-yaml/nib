@@ -78,11 +78,6 @@ impl MemoryStore {
         &self.path
     }
 
-    pub fn load(&self) -> MemoryStoreData {
-        self.load_result()
-            .unwrap_or_else(|error| panic!("failed to load memory store: {error}"))
-    }
-
     pub fn load_result(&self) -> Result<MemoryStoreData, String> {
         self.with_lock(|directory| self.load_unlocked(directory))
     }

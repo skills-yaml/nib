@@ -192,7 +192,7 @@ Rules for every level:
   Specific rules beat general ones.
 - **Rule layers:** user (`~/.nib/config.toml`), then trusted project shared
   (`.nib/config.toml`), then project local (user-home per-project state, see
-  [T082](../../backlog/architecture/T082_user_home_runtime_state_and_sqlite_sessions.md)).
+  [T082](../../development/architecture/T082_user_home_runtime_state_and_sqlite_sessions.md)).
   Project-shared rules apply only after the folder is trusted. Deny rules
   always apply.
 - **Prompt choices:** *Yes once* / *Yes, always allow `<prefix>` in this

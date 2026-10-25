@@ -166,27 +166,6 @@ pub struct Curator {
 }
 
 impl Curator {
-    /// Creates a fail-closed curator for the legacy project state layout.
-    pub fn new(project_root: &Path, retention_days: i64) -> Self {
-        Self::new_with_policy(project_root, retention_days, CuratorPolicy::default())
-    }
-
-    pub fn new_with_policy(
-        project_root: &Path,
-        retention_days: i64,
-        policy: CuratorPolicy,
-    ) -> Self {
-        let state_dir = project_root.join(".nib");
-        Self::at_profile_paths(
-            state_dir.join("sessions"),
-            state_dir.join("memory.json"),
-            state_dir.join("managed-skills"),
-            state_dir.join("daemons"),
-            retention_days,
-            policy,
-        )
-    }
-
     /// Backward-compatible constructor. The other profile-owned paths are derived
     /// from the daemon directory's parent, never from configured/source skill roots.
     pub fn at_paths(
@@ -252,20 +231,12 @@ impl Curator {
             .map_err(|error| error.to_string())
     }
 
-    pub fn cleanup(&self) -> Result<CuratorReport, String> {
-        self.cleanup_at(Utc::now())
-    }
-
     pub fn cleanup_at(&self, now: DateTime<Utc>) -> Result<CuratorReport, String> {
         self.validate_retention()?;
         let mut report = self.cleanup_old_sessions_at(now)?;
         report.merge(self.cleanup_old_memory_at(now)?);
         report.merge(self.cleanup_old_skills_at(now)?);
         Ok(report)
-    }
-
-    pub fn cleanup_old_sessions(&self) -> Result<usize, String> {
-        Ok(self.cleanup_old_sessions_at(Utc::now())?.sessions_deleted)
     }
 
     #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
@@ -946,11 +917,6 @@ impl Curator {
             .map(|_| ())
     }
 
-    pub fn unpin_session(&self, session_id: &str) -> Result<bool, String> {
-        validate_identifier(session_id, "session id")?;
-        self.update_pin(PinKind::Session, session_id, false)
-    }
-
     pub fn is_pinned(&self, session_id: &str) -> Result<bool, String> {
         validate_identifier(session_id, "session id")?;
         Ok(self.load_pins()?.sessions.contains(session_id))
@@ -962,19 +928,9 @@ impl Curator {
             .map(|_| ())
     }
 
-    pub fn unpin_memory(&self, namespace: MemoryNamespace, key: &str) -> Result<bool, String> {
-        validate_memory_key(key)?;
-        self.update_pin(PinKind::Memory(namespace), key, false)
-    }
-
     pub fn pin_skill(&self, skill_id: &str) -> Result<(), String> {
         validate_identifier(skill_id, "skill id")?;
         self.update_pin(PinKind::Skill, skill_id, true).map(|_| ())
-    }
-
-    pub fn unpin_skill(&self, skill_id: &str) -> Result<bool, String> {
-        validate_identifier(skill_id, "skill id")?;
-        self.update_pin(PinKind::Skill, skill_id, false)
     }
 
     pub fn validate_state(&self) -> Result<(), String> {

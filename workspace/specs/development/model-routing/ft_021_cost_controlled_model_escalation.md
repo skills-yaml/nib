@@ -1,10 +1,10 @@
 # FT-021: Cost-Controlled Model Escalation
 
-**Status:** Backlog — proposal requested on 2026-09-30; model choices, spending
+**Status:** Development. Started on 2026-10-22 under a user-requested multi-agent goal;
+the user delegated the open decisions to the agent ("you pick").
 
-State: backlog
+State: development
 Primary Feature: model-routing
-limits, and quality targets require decisions before development.
 
 ## Summary
 
@@ -198,7 +198,7 @@ complexity. Repeated cheap sampling requires a reliable selector and may spend
 the savings on unsuccessful attempts. A learned router is a later option once
 nib has representative labeled outcomes.
 
-## Delivery and Evaluation
+## Delivery and Evaluation (Rollout Plan)
 
 1. Define worker hosting, role/model candidates, ceilings, workload, and acceptance
    targets. Build baseline evidence under the same harness and task requirements.
@@ -278,6 +278,33 @@ new external destinations.
 Resolve these decisions and record a scoped implementation plan and validation
 policy before the next allowed transition, `backlog -> development`.
 
+## Decisions (2026-10-22)
+
+The user asked the agent to pick these defaults; they are recorded here as
+the scoped implementation plan and validation policy.
+
+1. Worker transport: any configured provider/model. The worker and the
+   escalation model are named from nib's existing model catalog; local and
+   API models are both allowed because they share the provider layer.
+2. Models and spending authority: no model is chosen by nib. Escalation is
+   off unless the user configures an escalation model. No new provider or
+   data-sharing path is added.
+3. "Rarely": at most 2 escalations per run by default (configurable), and at
+   most 25% of a run's model tokens on the escalation model when usage is
+   reported.
+4. Savings, quality, latency and repair targets: not measured in this
+   delivery, because paid calls are not authorized. Live evaluation stays an
+   open qualification item.
+5. Triggers: an explicit request by the worker (a bounded "ask for advice"
+   step), repeated failures (3 consecutive failed tool calls or
+   verifications), or the user (a `/escalate` command). Each escalation is
+   first a bounded advice turn; a takeover is limited to one turn.
+6. Task set and verification: deterministic offline fixtures with scripted
+   providers cover the triggers, limits, audit records and continuation.
+7. Budget units: provider-reported tokens, with escalation calls counted
+   when usage is missing; prompt-cache reads and writes use the usage fields
+   that FT-022 adds.
+
 ## Prior Memory Notes
 
 Pending. The user preference for mostly cheaper/open-weight execution with rare
@@ -290,9 +317,10 @@ is approved, without storing credentials or transient task traces.
 
 | Component | Impact | Release | Rationale |
 | --- | --- | --- | --- |
-| nib | none | none | Backlog proposal only; no shipped artifact changes until separately scoped development and reservation. |
+| nib | minor | nib-goal-minor | Additive opt-in routing configuration and audit records; shares the goal minor 0.6.0 from published 0.5.2. |
 
 ## Memory Impact
 
-Status: none
-Rationale: The proposal records open choices without adopting new policy; approved durable decisions will be classified during development.
+Status: pending
+Rationale: The decisions recorded above are durable; they are written to project
+memory when this spec is verified.

@@ -387,7 +387,7 @@ fn release_qualification_task_contract_is_stable() {
     }
     assert!(
         taskfile.contains(
-            "test:llm-release:\n    desc: Run deterministic T021 release-binary harness contract tests\n    cmds:\n      - cargo test --test release_binary_qualification -- --test-threads=1"
+            "test:llm-release:\n    desc: Run deterministic T021 release-binary harness contract tests\n    deps: [test:focused-runner]\n    cmds:\n      - '{{.FOCUSED_TEST}} --test release_binary_qualification -- --test-threads=1'"
         ),
         "focused deterministic Task target drifted"
     );

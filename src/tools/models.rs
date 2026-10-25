@@ -1,6 +1,5 @@
 //! Tool permission models and call/result types.
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt;
@@ -208,16 +207,4 @@ impl PolicyRule {
                 .contains(&needle.to_lowercase())
         })
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct ExecutionRecord {
-    pub id: String,
-    pub session_id: String,
-    pub tool_name: String,
-    pub arguments: Value,
-    pub result: ToolResult,
-    pub approval: ApprovalDecision,
-    pub worktree_path: Option<String>,
-    pub timestamp: DateTime<Utc>,
 }

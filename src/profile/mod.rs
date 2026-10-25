@@ -139,10 +139,6 @@ impl Profile {
         &self.memory_path
     }
 
-    pub fn context_path(&self) -> &Path {
-        &self.context_path
-    }
-
     pub fn sessions_dir(&self) -> &Path {
         &self.sessions_dir
     }

@@ -154,10 +154,6 @@ impl Cron {
         })
     }
 
-    pub fn remove(&mut self, id: &str) -> Result<Option<CronJob>, String> {
-        self.mutate_jobs(|jobs| Ok(jobs.remove(id)))
-    }
-
     pub fn jobs(&self) -> impl Iterator<Item = &CronJob> {
         self.jobs.values()
     }
@@ -240,30 +236,6 @@ impl Cron {
         self.jobs = jobs.jobs;
         self.occurrences = jobs.occurrences;
         outcome
-    }
-
-    /// Backward-compatible legacy-layout maintenance entry point with strict errors.
-    pub fn run_maintenance(
-        project_root: &Path,
-        retention_days: i64,
-    ) -> Result<CuratorReport, String> {
-        let report = Self::run_maintenance_with_policy(
-            project_root,
-            retention_days,
-            CuratorPolicy::default(),
-        )?;
-        if report.deleted > 0 {
-            println!("Curator: Cleaned up {} old records.", report.deleted);
-        }
-        Ok(report)
-    }
-
-    pub fn run_maintenance_with_policy(
-        project_root: &Path,
-        retention_days: i64,
-        policy: CuratorPolicy,
-    ) -> Result<CuratorReport, String> {
-        Curator::new_with_policy(project_root, retention_days, policy).cleanup()
     }
 
     /// Runs the selected profile's curator only when its durable cron schedule is due.
