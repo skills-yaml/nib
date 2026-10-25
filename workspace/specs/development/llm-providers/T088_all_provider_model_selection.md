@@ -12,12 +12,12 @@ credentials and transport settings. No live discovery or workload migration.
 
 ## Acceptance Criteria
 
-- [ ] AC-1: Both selectors list every configured provider’s effective suggestions,
+- [x] AC-1: Both selectors list every configured provider’s effective suggestions,
   including selected custom IDs and explicit empty overrides, deterministically.
-- [ ] AC-2: Selecting a provider/model choice persists both provider and model;
+- [x] AC-2: Selecting a provider/model choice persists both provider and model;
   identical IDs on different providers remain distinct. Existing factory resolution
   uses that active provider for the next run.
-- [ ] AC-3: Unqualified exact IDs and single-provider behavior remain compatible;
+- [x] AC-3: Unqualified exact IDs and single-provider behavior remain compatible;
   missing providers and empty model selections fail without mutation.
 - [ ] AC-4: Regression tests, independent review and canonical gates pass.
 
@@ -49,4 +49,29 @@ Rationale: The explicit all-provider selection preference is recorded in
 
 No integration, main merge or publication yet. Missing peer board is preserved;
 existing worktrees and primary checkout remain untouched. Dedicated detached worktree
-based on published development 89156f6. No coordination-board recovery attempted.
+initially based on published development 89156f6, then rebased onto shared
+development f8861c5 to preserve the newly integrated configuration layers. No coordination-board recovery attempted.
+
+
+## Review and Criterion Evidence
+
+Independent spec-compliance and code-quality review approved the full source
+candidate (diff from f8861c5 SHA-256
+`f5c9c8fad2d42a9699b82fd8c91ace924ee06a6c5ce503cf34ba03796ba27cb6`).
+Findings about opaque model IDs, implicit Mock/configured providers and minor
+version classification were fixed and accepted by the reviewer.
+
+AC-1: `all_providers_are_selectable_and_selection_preserves_provider_settings`
+and `bundled_models_and_empty_overrides_are_provider_specific` pass. AC-2:
+`chat_model_picker_switches_to_another_configured_provider`,
+`model_picker_preserves_provider_identity_for_duplicate_ids` and the provider
+settings/factory diagnostics test pass. AC-3:
+`opaque_exact_ids_and_implicit_mock_remain_usable` and
+`user_level_provider_selection_writes_only_project_preferences` pass; the latter
+also verifies the user file is byte-for-byte unchanged and project preferences
+contain neither credentials nor endpoints. Existing exact-ID tests pass.
+
+Canonical gates remain required on the frozen candidate. Test commands use one
+Cargo build job and disabled dev/test debug symbols to fit local memory; the
+initial default-debug lib-test compile was killed by the host. This changes no
+repository build policy or test selection. No paid provider requests are used.

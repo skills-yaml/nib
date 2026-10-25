@@ -1752,7 +1752,7 @@ fn save_selected_model(
     }
     let config = load_nib_config_full(project_root).map_err(|error| error.to_string())?;
     let sensitive_values = config.public_session_sensitive_values();
-    let implicit_provider = provider.is_none();
+    let implicit_mock = provider.is_none() || config.llm.get_active_provider() == "mock";
     let provider = provider
         .map(str::to_string)
         .unwrap_or_else(|| config.llm.get_active_provider());
@@ -1775,9 +1775,7 @@ fn save_selected_model(
             );
             config.llm.active_provider = Some(selected_provider);
             Ok(())
-        } else if selected_provider == "mock"
-            && (implicit_provider || config.llm.providers.is_empty())
-        {
+        } else if selected_provider == "mock" && implicit_mock {
             config
                 .llm
                 .add_or_update_provider(selected_provider, selected_model, None);

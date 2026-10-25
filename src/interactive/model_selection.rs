@@ -156,6 +156,7 @@ mod tests {
                 .get_active_provider(),
             "mock"
         );
+        let root = tempfile::tempdir().unwrap();
         config
             .llm
             .add_or_update_provider("openai".into(), "gateway::model".into(), None);
@@ -166,6 +167,7 @@ mod tests {
             .available
             .iter()
             .all(|choice| choice.provider == "openai"));
+        set_provider_model(root.path(), "mock", "typed-fallback").unwrap();
         let custom = choices
             .available
             .iter()
@@ -179,5 +181,49 @@ mod tests {
             loaded.llm.providers["openai"].model,
             "openrouter::opaque-model"
         );
+    }
+
+    #[test]
+    fn user_level_provider_selection_writes_only_project_preferences() {
+        let home = crate::paths::TestNibHome::isolated();
+        let root = tempfile::tempdir().unwrap();
+        crate::config::update_user_config(|config| {
+            config
+                .llm
+                .add_or_update_provider("openai".into(), "first".into(), None);
+            config.llm.add_or_update_provider(
+                "openrouter".into(),
+                "vendor/custom".into(),
+                Some("fixture-key".into()),
+            );
+            config.llm.providers.get_mut("openrouter").unwrap().base_url =
+                Some("https://gateway.example/v1".into());
+            config.llm.active_provider = Some("openai".into());
+            Ok(())
+        })
+        .unwrap();
+        let path = home.directory.path().join("config.toml");
+        let user_config = std::fs::read(&path).unwrap();
+        let choices = selection(&load_nib_config_full(root.path()).unwrap());
+        assert!(choices
+            .available
+            .iter()
+            .any(|choice| choice.provider == "openrouter"));
+        set_provider_model(root.path(), "openrouter", "other/model").unwrap();
+        let config = load_nib_config_full(root.path()).unwrap();
+        assert_eq!(config.llm.get_active_provider(), "openrouter");
+        assert_eq!(config.llm.providers["openrouter"].model, "other/model");
+        assert_eq!(
+            config.llm.providers["openrouter"].api_key.as_deref(),
+            Some("fixture-key")
+        );
+        assert_eq!(
+            config.llm.providers["openrouter"].base_url.as_deref(),
+            Some("https://gateway.example/v1")
+        );
+        assert_eq!(std::fs::read(path).unwrap(), user_config);
+        let preferences = std::fs::read_to_string(root.path().join(".nib/config.toml")).unwrap();
+        assert!(!preferences.contains("fixture-key"));
+        assert!(!preferences.contains("gateway.example"));
     }
 }
