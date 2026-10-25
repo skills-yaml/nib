@@ -583,5 +583,5 @@ Content:
 
 T087, FT-022, FT-021 and T082 are integrated into shared development under
 the shared minor 0.6.0 and are in test. Windows verification of T082 (bundled
-SQLite and the PowerShell smoke) waits for delivery to main; main delivery
-and publication remain separate.
+SQLite and the PowerShell smoke) waits for delivery to main. The
+development channel published 0.6.0 at f8861c5; main delivery is separate.

@@ -194,7 +194,7 @@
       "target": "0.6.0",
       "impact": "minor",
       "timing": "development-start",
-      "status": "applied",
+      "status": "released",
       "owner": "goal-base",
       "version_source": "Cargo.toml",
       "specs": [
@@ -203,7 +203,7 @@
         "workspace/specs/test/model-routing/ft_021_cost_controlled_model_escalation.md",
         "workspace/specs/test/prompt-caching/ft_022_provider_prompt_caching.md"
       ],
-      "evidence": "User-requested multi-agent goal on 2026-10-22 to implement and verify the open specs. Published development 0.5.2 (0af60f5) cannot be reused, so one shared minor 0.6.0 is reserved from it for T082, T087, FT-021 and FT-022. The peer board is not initialized on this machine, so the single-owner reservation is recorded here directly and validated by task versions:check. Owner goal-base applied Cargo.toml, Cargo.lock and skills.yaml once at development start, before the task branches; members do not apply another bump. Application is not integration, main delivery or publication. Confirmed shared development integration on 2026-10-25: T087 via PR71 at 89156f697350f4baf77de9dfb6d5838dc77272fd, FT-022 via PR72 at f8e30c0658932d87cfefc5305d82a9b44c13f3db, FT-021 via PR73 at 272c18e115fce13362812e7ba74e7e984b07e6f2 and T082 via PR74 at f8861c5eef05d17a56e85b9f7c67cd382a0b16e8, each merged pinned to its verified head; the members move to test without a second bump. Main delivery and publication remain separate."
+      "evidence": "User-requested multi-agent goal on 2026-10-22 to implement and verify the open specs. Published development 0.5.2 (0af60f5) cannot be reused, so one shared minor 0.6.0 is reserved from it for T082, T087, FT-021 and FT-022. The peer board is not initialized on this machine, so the single-owner reservation is recorded here directly and validated by task versions:check. Owner goal-base applied Cargo.toml, Cargo.lock and skills.yaml once at development start, before the task branches; members do not apply another bump. Application is not integration, main delivery or publication. Confirmed shared development integration on 2026-10-25: T087 via PR71 at 89156f697350f4baf77de9dfb6d5838dc77272fd, FT-022 via PR72 at f8e30c0658932d87cfefc5305d82a9b44c13f3db, FT-021 via PR73 at 272c18e115fce13362812e7ba74e7e984b07e6f2 and T082 via PR74 at f8861c5eef05d17a56e85b9f7c67cd382a0b16e8, each merged pinned to its verified head; the members move to test without a second bump. Main delivery and publication remain separate. Observed on 2026-10-25: the public development-latest nib-release.json binds 0.6.0 to commit f8861c5eef05d17a56e85b9f7c67cd382a0b16e8, so 0.6.0 is released on the development channel."
     }
   ]
 }
