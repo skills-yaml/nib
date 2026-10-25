@@ -173,12 +173,13 @@ tasks:
 
   test:prompt-caching:
     desc: Run credential-free FT-022 prompt-cache request-shape, usage, and stable-prefix tests
+    deps: [test:focused-runner]
     cmds:
-      - 'cargo test --lib llm::types::tests:: -- --test-threads=1'
-      - 'cargo test --lib llm::anthropic::tests:: -- --test-threads=1'
-      - 'cargo test --lib prompt_cache -- --test-threads=1'
-      - 'cargo test --lib context::budget::tests:: -- --test-threads=1'
-      - 'cargo test --lib context::snapshot::tests:: -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib llm::types::tests:: -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib llm::anthropic::tests:: -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib prompt_cache -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib context::budget::tests:: -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib context::snapshot::tests:: -- --test-threads=1'
 
   test:durable:
     desc: Run durable background task and scheduled worker integration tests
