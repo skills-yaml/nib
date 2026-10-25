@@ -16,7 +16,7 @@ mod skill_io;
 pub mod skills;
 pub mod snapshot;
 
-pub use agents::{find_agents_md, format_context_for_prompt, load_agents_md};
+pub use agents::load_agents_md;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BoundedSessionContext {
@@ -331,46 +331,6 @@ fn render_bounded_human_context(session: &Session, max_tokens: usize) -> Option<
     (!bounded.is_empty()).then_some(bounded)
 }
 
-pub fn assemble_context(project_path: &Path, task: Option<&str>) -> String {
-    let mut ctx = format_context_for_prompt(project_path, task);
-
-    let project_docs = project_docs::load_project_docs(project_path);
-    if !project_docs.is_empty() {
-        ctx.push_str("\n\n## Project Standards and Library Documentation\n");
-        for section in project_docs {
-            ctx.push_str(&format!("\n### {}\n{}\n", section.label, section.content));
-        }
-    }
-
-    // Inject Memory Store
-    let memory_store = crate::session::memory::MemoryStore::new(project_path);
-    let mem = memory_store.load();
-    if !mem.environment.is_empty() || !mem.user.is_empty() {
-        ctx.push_str("\n\n## Long-Term Memory\n");
-        if !mem.environment.is_empty() {
-            ctx.push_str("### Environment Facts\n");
-            for (k, v) in &mem.environment {
-                ctx.push_str(&format!("- {}: {}\n", k, v));
-            }
-        }
-        if !mem.user.is_empty() {
-            ctx.push_str("### User Preferences\n");
-            for (k, v) in &mem.user {
-                ctx.push_str(&format!("- {}: {}\n", k, v));
-            }
-        }
-    }
-
-    // Inject Skills
-    let skills_block = crate::context::skills::load_relevant_skills(project_path, task);
-    if !skills_block.is_empty() {
-        ctx.push_str("\n\n");
-        ctx.push_str(&skills_block);
-    }
-
-    ctx
-}
-
 pub fn select_profile_skills(
     project_root: &Path,
     config: &crate::config::NibConfig,
@@ -434,15 +394,6 @@ pub fn selection_from_catalog(
             .collect(),
         skills: selected,
     })
-}
-
-pub fn assemble_runtime_context(
-    project_root: &Path,
-    goal: &str,
-    active_skills: &[skills::Skill],
-    memory: &crate::session::memory::MemoryStoreData,
-) -> String {
-    assemble_runtime_context_sections(project_root, goal, active_skills, memory).render()
 }
 
 pub fn assemble_runtime_context_sections(

@@ -3,6 +3,11 @@ version: '3'
 # nib - Task runner (Rust CLI + core).
 # All checks, tests, and builds go through these tasks.
 
+vars:
+  # Focused test commands run through this guard so a selection that matches zero
+  # tests fails instead of passing silently (T087). It is built by test:focused-runner.
+  FOCUSED_TEST: ./target/debug/examples/focused_test{{exeExt}}
+
 tasks:
   default:
     desc: List available tasks
@@ -36,9 +41,10 @@ tasks:
 
   docs:check:
     desc: Validate internal Markdown links and spec-state invariants
+    deps: [test:focused-runner]
     cmds:
       - task: workspace:check
-      - cargo test --test docs_integrity -- --test-threads=1
+      - '{{.FOCUSED_TEST}} --test docs_integrity -- --test-threads=1'
 
   workspace:check:
     desc: Validate Workspace structure, catalog, memory, versions, and WIP records
@@ -56,8 +62,9 @@ tasks:
 
   test:workspace:
     desc: Exercise Workspace validators with positive and negative fixtures
+    deps: [test:focused-runner]
     cmds:
-      - cargo test --test workspace_governance -- --test-threads=1
+      - '{{.FOCUSED_TEST}} --test workspace_governance -- --test-threads=1'
 
   installers:check:
     desc: Validate installer syntax and pinned release defaults
@@ -95,36 +102,49 @@ tasks:
 
   test:integration:
     desc: Run every integration test target
+    deps: [test:focused-runner]
     env:
       NIB_HOME: '{{.ROOT_DIR}}/target/test-nib-home'
     cmds:
-      - "cargo test --test '*' -- --test-threads=1"
+      - "{{.FOCUSED_TEST}} --test '*' -- --test-threads=1"
+
+  test:focused-runner:
+    desc: Build the zero-selection guard that every focused test command runs through
+    internal: true
+    run: once
+    cmds:
+      - cargo build --quiet --example focused_test
 
   test:llm-failure-cli:
     desc: Verify local HTTP failure and plain-chat recovery fixtures
+    deps: [test:focused-runner]
     cmds:
-      - 'cargo test --test llm_failure_cli -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --test llm_failure_cli -- --test-threads=1'
 
   test:mcp-stack:
     desc: Run the MCP provider-failure regression with a one MiB test-thread stack
     cmds:
+      # Build the test binary and the runner before the stack limit applies.
       - cargo test --lib --no-run
+      - task: test:focused-runner
       - task: test:mcp-stack:small-stack
 
   test:mcp-stack:small-stack:
     internal: true
+    deps: [test:focused-runner]
     env:
       RUST_MIN_STACK: '1048576'
     cmds:
       - >-
-        cargo test --lib
-        integrations::mcp_server::tests::nib_run_provider_failure_reaches_mcp_status_as_typed_llm_error
+        {{.FOCUSED_TEST}} --lib
+        integrations::mcp_server::tests::test_part_1::nib_run_provider_failure_reaches_mcp_status_as_typed_llm_error
         -- --exact --test-threads=1 --nocapture
 
   test:tui-cache:
     desc: Verify TUI session display cache refresh and lock-wait behavior
+    deps: [test:focused-runner]
     cmds:
-      - cargo test --lib tui::tests::session_display_cache_ -- --test-threads=1
+      - '{{.FOCUSED_TEST}} --lib tui::tests::render::session_display_cache_ -- --test-threads=1'
 
   verify:
     desc: Run the complete local static and test gates once
@@ -134,29 +154,32 @@ tasks:
 
   test:skills:
     desc: Verify skill discovery, activation, resources, and command controls
+    deps: [test:focused-runner]
     cmds:
-      - cargo test --lib context::skill -- --test-threads=1
-      - cargo test --lib tools::executor::skills -- --test-threads=1
-      - cargo test --lib skill_cmd::tests -- --test-threads=1
+      - '{{.FOCUSED_TEST}} --lib context::skill -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib tools::executor::skills -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib skill_cmd::tests -- --test-threads=1'
 
   test:llm-conformance:
     desc: Run credential-free provider-neutral LLM adapter conformance tests
+    deps: [test:focused-runner]
     cmds:
-      - 'cargo test --lib llm::gemini::tests::idless_parallel_continuation_ -- --test-threads=1'
-      - 'cargo test --lib llm::factory::tests::factory_rejects_every_unused_mock_transport_or_credential_field -- --exact --test-threads=1'
-      - 'cargo test --lib llm::factory::tests::factory_mock_consumes_model_fields_for_complete_and_stream -- --exact --test-threads=1'
-      - 'cargo test --lib llm::factory::tests::reviewed_http_client_override_is_limited_to_openai_compatible_adapters -- --exact --test-threads=1'
-      - 'cargo test --lib config::tests::mock_rejects_unused_transport_and_credential_fields_but_keeps_model_catalog_fields -- --exact --test-threads=1'
-      - 'cargo test --lib llm::conformance::tests:: -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib llm::gemini::tests::idless_parallel_continuation_ -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib llm::factory::tests::factory_rejects_every_unused_mock_transport_or_credential_field -- --exact --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib llm::factory::tests::factory_mock_consumes_model_fields_for_complete_and_stream -- --exact --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib llm::factory::tests::reviewed_http_client_override_is_limited_to_openai_compatible_adapters -- --exact --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib config::tests::mock_rejects_unused_transport_and_credential_fields_but_keeps_model_catalog_fields -- --exact --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib llm::conformance::tests:: -- --test-threads=1'
 
   test:prompt-caching:
     desc: Run credential-free FT-022 prompt-cache request-shape, usage, and stable-prefix tests
+    deps: [test:focused-runner]
     cmds:
-      - 'cargo test --lib llm::types::tests:: -- --test-threads=1'
-      - 'cargo test --lib llm::anthropic::tests:: -- --test-threads=1'
-      - 'cargo test --lib prompt_cache -- --test-threads=1'
-      - 'cargo test --lib context::budget::tests:: -- --test-threads=1'
-      - 'cargo test --lib context::snapshot::tests:: -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib llm::types::tests:: -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib llm::anthropic::tests:: -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib prompt_cache -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib context::budget::tests:: -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib context::snapshot::tests:: -- --test-threads=1'
 
   test:model-escalation:
     desc: Run offline FT-021 model escalation tests with scripted providers
@@ -165,118 +188,129 @@ tasks:
 
   test:durable:
     desc: Run durable background task and scheduled worker integration tests
+    deps: [test:focused-runner]
     cmds:
-      - cargo test --test durable_tasks -- --test-threads=1
+      - '{{.FOCUSED_TEST}} --test durable_tasks -- --test-threads=1'
 
   test:delegation:
     desc: Run managed-process and subagent delegation tests
+    deps: [test:focused-runner]
     cmds:
       - >-
-        cargo test --lib
+        {{.FOCUSED_TEST}} --lib
         tools::delegation::tests::test_part_2::legacy_precommit_audit_is_adopted_and_upgraded_without_duplication
         -- --exact --test-threads=1
       - >-
-        cargo test --lib
+        {{.FOCUSED_TEST}} --lib
         tools::delegation::tests::test_part_3::record_bridge_uses_only_the_modern_stripe_and_obeys_one_deadline
         -- --exact --test-threads=1
       - >-
-        cargo test --lib
+        {{.FOCUSED_TEST}} --lib
         daemons::state::tests::test_part_0::optional_read_write_
         -- --test-threads=1
       - >-
-        cargo test --lib
+        {{.FOCUSED_TEST}} --lib
         tools::delegation::tests::test_part_0::sync_and_cancellable_record_failures_rollback_exact_fallback_audit_preparation
         -- --exact --test-threads=1
       - >-
-        cargo test --lib
+        {{.FOCUSED_TEST}} --lib
         tools::delegation::tests::test_part_3::persistent_anchor_prevents_replaced_repository_lock_domains
         -- --exact --test-threads=1
       - >-
-        cargo test --lib
+        {{.FOCUSED_TEST}} --lib
         tools::delegation::tests::test_overflow::terminal_retry_finishes_owner_cleanup_and_audits_exactly_once
         -- --exact --test-threads=1
       - >-
-        cargo test --lib
+        {{.FOCUSED_TEST}} --lib
         tools::delegation::tests::test_part_3::sweep_pair_and_both_half_deletions_stop_at_expired_quarantines
         -- --exact --test-threads=1
       - >-
-        cargo test --lib
+        {{.FOCUSED_TEST}} --lib
         tools::delegation::tests::test_part_2::missing_legacy_directory_retries_anchor_quarantine_without_creating_state
         -- --exact --test-threads=1
       - >-
-        cargo test --lib
+        {{.FOCUSED_TEST}} --lib
         tools::delegation::tests::test_part_2::direct_terminal_cancellation_waits_for_live_owner_cleanup_before_resolution
         -- --exact --test-threads=1
       - >-
-        cargo test --lib
+        {{.FOCUSED_TEST}} --lib
         tools::delegation::tests::test_part_2::bounded_reconciliation_record_does_not_publish_after_precommit_expiry
         -- --exact --test-threads=1
       - >-
-        cargo test --lib
+        {{.FOCUSED_TEST}} --lib
         tools::delegation::tests::test_part_2::contradictory_terminal_record_and_manager_states_fail_closed
         -- --exact --test-threads=1
       - >-
-        cargo test --lib
+        {{.FOCUSED_TEST}} --lib
         tools::delegation::tests::test_part_2::dead_anchor_only_record_without_process_scope_requires_recovery
         -- --exact --test-threads=1
       - >-
-        cargo test --lib
+        {{.FOCUSED_TEST}} --lib
         tools::delegation::tests::test_part_0::spawn_intent_and_session_atomic_phase_crashes_reconcile_exactly
         -- --exact --test-threads=1
-      - >-
-        cargo test --lib
-        integrations::mcp_server::tests::test_part_1::mcp_subagent_flow_accepts_a_dos_short_project_root
-        -- --exact --test-threads=1
-      - 'cargo test --lib sandbox::process::tests:: -- --test-threads=1'
-      - cargo test --test delegation -- --test-threads=1
+      # The DOS short-name fixture is Windows-only; elsewhere it would select nothing.
+      - cmd: >-
+          {{.FOCUSED_TEST}} --lib
+          integrations::mcp_server::tests::test_part_1::mcp_subagent_flow_accepts_a_dos_short_project_root
+          -- --exact --test-threads=1
+        platforms: [windows]
+      - '{{.FOCUSED_TEST}} --lib sandbox::process::tests:: -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --test delegation -- --test-threads=1'
 
   test:runtime-e2e:
     desc: Run the full agent runtime end-to-end integration tests
+    deps: [test:focused-runner]
     cmds:
-      - cargo test --test test_runtime_e2e -- --test-threads=1
+      - '{{.FOCUSED_TEST}} --test test_runtime_e2e -- --test-threads=1'
 
   test:terminal-preflight:
     desc: Verify terminal listing classification, scope recovery, and isolated execution
+    deps: [test:focused-runner]
     summary: Run offline T060 classifier, instruction, approval, display, and runtime regressions.
     cmds:
-      - 'cargo test --lib tools::classifier::tests:: -- --test-threads=1'
-      - 'cargo test --lib context::agents::tests:: -- --test-threads=1'
-      - 'cargo test --lib classifier_requires_available_isolation_for_cargo_git_and_task_commands -- --test-threads=1'
-      - 'cargo test --lib terminal_scope_recovery_is_consistent_live_and_reloaded -- --test-threads=1'
-      - 'cargo test --lib task_executable_mount -- --test-threads=1'
-      - 'cargo test --lib bwrap_preserves_home_installed_task -- --test-threads=1'
-      - 'cargo test --test test_runtime_e2e task_listing_without_affected_paths -- --test-threads=1'
-      - 'cargo test --test test_runtime_e2e missing_terminal_scope -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib tools::classifier::tests:: -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib context::agents::tests:: -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib classifier_requires_available_isolation_for_cargo_git_and_task_commands -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib terminal_scope_recovery_is_consistent_live_and_reloaded -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib task_executable_mount -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib bwrap_preserves_home_installed_task -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --test test_runtime_e2e task_listing_without_affected_paths -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --test test_runtime_e2e missing_terminal_scope -- --test-threads=1'
 
   test:agent-context:
     desc: Run offline agent loop, planner, context, and compression tests
+    deps: [test:focused-runner]
     cmds:
-      - 'cargo test --lib context:: -- --test-threads=1'
-      - 'cargo test --lib agent:: -- --test-threads=1'
-      - cargo test --test build_metadata -- --test-threads=1
+      - '{{.FOCUSED_TEST}} --lib context:: -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib agent:: -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --test build_metadata -- --test-threads=1'
 
   test:worktree:
     desc: Run managed session and subagent worktree unit tests
+    deps: [test:focused-runner]
     cmds:
-      - 'cargo test --lib sandbox::worktree::tests:: -- --test-threads=1'
-      - 'cargo test --lib integrations::worktree::tests:: -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib sandbox::worktree::tests:: -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib integrations::worktree::tests:: -- --test-threads=1'
 
   test:managed-process-capability:
     desc: Verify the exact managed-process backend probe independently
+    deps: [test:focused-runner]
     cmds:
-      - cargo test --test managed_process_capability -- --test-threads=1
+      - '{{.FOCUSED_TEST}} --test managed_process_capability -- --test-threads=1'
 
   test:updater:
     desc: Run self-update and update-notification unit tests
+    deps: [test:focused-runner]
     cmds:
-      - cargo test --bin nib updater::tests -- --test-threads=1
-      - cargo test --test updater -- --test-threads=1
+      - '{{.FOCUSED_TEST}} --bin nib updater::tests -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --test updater -- --test-threads=1'
 
   test:doctor:
     desc: Run doctor diagnosis and repair tests
+    deps: [test:focused-runner]
     cmds:
-      - cargo test --bin nib doctor::tests -- --test-threads=1
-      - cargo test --test doctor_cli -- --test-threads=1
+      - '{{.FOCUSED_TEST}} --bin nib doctor::tests -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --test doctor_cli -- --test-threads=1'
 
   qualify:release-update:unix:
     desc: Qualify a published development self-update on a native Unix runner
@@ -317,54 +351,62 @@ tasks:
 
   test:installers:
     desc: Run installer and release-transaction integration tests
+    deps: [test:focused-runner]
     cmds:
-      - cargo test --test installers -- --test-threads=1
+      - '{{.FOCUSED_TEST}} --test installers -- --test-threads=1'
 
   test:git-status:
     desc: Verify strict read-only Git status isolation and executable-helper boundaries
+    deps: [test:focused-runner]
     cmds:
-      - 'cargo test --lib git_status -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib git_status -- --test-threads=1'
 
   test:sandbox-mounts:
     desc: Verify the project-aware sandbox mount plan and protected Git surfaces
+    deps: [test:focused-runner]
     cmds:
-      - 'cargo test --lib project_mounts -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib project_mounts -- --test-threads=1'
 
   test:task-contract:
     desc: Validate Task composition and strict Rust lint policy
+    deps: [test:focused-runner]
     cmds:
       - >-
-        cargo test --test installers
+        {{.FOCUSED_TEST}} --test installers
         task_contract_ -- --test-threads=1
 
   test:tui-shutdown:
     desc: Verify TUI cancellation, late modal cleanup, and shutdown deadlines
+    deps: [test:focused-runner]
     cmds:
-      - 'cargo test --lib tui::tests::tui_shutdown_ -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib tui::tests::session::tui_shutdown_ -- --test-threads=1'
 
   test:interactive:
     desc: Run deterministic plain/TUI interaction semantics without a pseudo-terminal
+    deps: [test:focused-runner]
     cmds:
-      - 'cargo test --lib exact_run_steering -- --test-threads=1'
-      - 'cargo test --lib interactive:: -- --test-threads=1'
-      - 'cargo test --lib tui::tests:: -- --test-threads=1'
-      - 'cargo test --bin nib console::tests:: -- --test-threads=1'
-      - 'cargo test --bin nib chat::tests:: -- --test-threads=1'
-      - cargo test --test interactive_cli -- --test-threads=1
+      - '{{.FOCUSED_TEST}} --lib exact_run_steering -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib interactive:: -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib tui::tests:: -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --bin nib console::tests:: -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --bin nib chat::tests:: -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --test interactive_cli -- --test-threads=1'
       - >-
-        cargo test --test installers
+        {{.FOCUSED_TEST}} --test installers
         interactive_release_smoke_is_offline_bounded_and_restoration_aware --
         --exact --test-threads=1
 
   test:llm-live:offline:
     desc: Run credential-free live LLM harness, matrix, planner, and report tests
+    deps: [test:focused-runner]
     cmds:
-      - cargo test --test llm_live -- --test-threads=1
+      - '{{.FOCUSED_TEST}} --test llm_live -- --test-threads=1'
 
   test:llm-release:
     desc: Run deterministic T021 release-binary harness contract tests
+    deps: [test:focused-runner]
     cmds:
-      - cargo test --test release_binary_qualification -- --test-threads=1
+      - '{{.FOCUSED_TEST}} --test release_binary_qualification -- --test-threads=1'
 
   test:llm-live:catalog:
     desc: Discover and reconcile live provider model catalogs (explicit opt-in)
@@ -425,6 +467,7 @@ tasks:
         msg: Set NIB_LIVE_TESTS=1 to acknowledge that this task makes real network calls.
       - sh: test "{{.MODE}}" = "catalog" || test "${NIB_LIVE_ACK_COSTS:-}" = "1"
         msg: Set NIB_LIVE_ACK_COSTS=1 to acknowledge provider usage and possible charges.
+    deps: [test:focused-runner]
     cmds:
       - |
         provider="${NIB_LIVE_PROVIDER:-all}"
@@ -432,7 +475,7 @@ tasks:
         NIB_LIVE_MODE="{{.MODE}}" \
         NIB_LIVE_PROVIDER="$provider" \
         NIB_LIVE_RESULTS_DIR="$results_dir" \
-          cargo test --test llm_live live_llm_qualification -- --ignored --exact --nocapture
+          {{.FOCUSED_TEST}} --test llm_live live_llm_qualification -- --ignored --exact --nocapture
 
   build:
     desc: Build optimized release binary (supports cross TARGET)
@@ -470,6 +513,7 @@ tasks:
     vars:
       SOURCE_COMMIT:
         sh: git rev-parse HEAD
+    deps: [test:focused-runner]
     env:
       NIB_BUILD_COMMIT: '{{.SOURCE_COMMIT}}'
       NIB_EXPECTED_BUILD_COMMIT: '{{.SOURCE_COMMIT}}'
@@ -477,7 +521,7 @@ tasks:
       - task: test:llm-release
       - task: build
       - >-
-        cargo test --test release_binary_qualification
+        {{.FOCUSED_TEST}} --test release_binary_qualification
         exact_release_binary_qualification --
         --ignored --exact --nocapture --test-threads=1
 

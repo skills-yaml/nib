@@ -259,14 +259,6 @@ impl ToolDefinition {
         &self.name
     }
 
-    pub fn description(&self) -> &str {
-        &self.description
-    }
-
-    pub fn parameters(&self) -> &Value {
-        &self.parameters
-    }
-
     pub fn from_openai_value(value: &Value) -> Result<Self, String> {
         let tool = value
             .as_object()
@@ -502,11 +494,6 @@ impl<'a> LlmRequest<'a> {
             scope: None,
             continuation: None,
         }
-    }
-
-    pub fn with_options(mut self, options: GenerationOptions) -> Self {
-        self.options = options;
-        self
     }
 
     pub fn with_temperature(mut self, value: f64) -> Result<Self, String> {
@@ -1104,11 +1091,6 @@ impl LlmResponse {
 
     pub fn with_retry_attempts(mut self, attempts: crate::llm::RetryAttemptMetadata) -> Self {
         self.attempts = attempts;
-        self
-    }
-
-    pub fn with_usage(mut self, usage: Option<LlmUsage>) -> Self {
-        self.usage = usage;
         self
     }
 }
