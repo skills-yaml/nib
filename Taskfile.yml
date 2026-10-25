@@ -183,8 +183,9 @@ tasks:
 
   test:model-escalation:
     desc: Run offline FT-021 model escalation tests with scripted providers
+    deps: [test:focused-runner]
     cmds:
-      - 'cargo test --lib agent::r#loop::escalation::tests:: -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib agent::r#loop::escalation::tests:: -- --test-threads=1'
 
   test:durable:
     desc: Run durable background task and scheduled worker integration tests
