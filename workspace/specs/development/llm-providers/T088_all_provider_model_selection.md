@@ -42,8 +42,8 @@ run final gates. No execution-loop, delegation or external-system changes.
 
 Status: updated
 Rationale: The explicit all-provider selection preference is recorded in
-[preferences](../../../agents/memory/preferences.md) and the
-[changelog](../../../agents/memory/changelog.md).
+[workspace/agents/memory/preferences.md](../../../agents/memory/preferences.md) and the
+[workspace/agents/memory/changelog.md](../../../agents/memory/changelog.md).
 
 ## Delivery
 
