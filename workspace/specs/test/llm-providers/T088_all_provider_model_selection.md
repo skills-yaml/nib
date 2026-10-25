@@ -61,7 +61,10 @@ Rationale: The explicit all-provider selection preference is recorded in
 [workspace/agents/memory/preferences.md](../../../agents/memory/preferences.md) and the
 [workspace/agents/memory/changelog.md](../../../agents/memory/changelog.md).
 
-## Delivery
+## Integration Evidence
+
+Revision: 76ed1bffe49769965a7ced6471aa884437e1437e
+Outcome: passed
 
 Confirmed shared development merge at
 `76ed1bffe49769965a7ced6471aa884437e1437e` via
