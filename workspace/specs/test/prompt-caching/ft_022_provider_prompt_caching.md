@@ -430,5 +430,7 @@ The reviewed head was 7b2d223. The
 later commits merge development (dropping `update_model_for_active`, which
 T087 removed as unused) and route `test:prompt-caching` through T087's
 focused-test guard; the full gates and CI reran on d13711e.
+An independent read-only review of those post-review changes on 2026-10-25
+found no correctness bugs.
 The merged tree equals the verified head. Main delivery and publication remain
 separate.

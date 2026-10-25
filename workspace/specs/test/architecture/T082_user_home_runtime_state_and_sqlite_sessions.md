@@ -778,5 +778,11 @@ later merges drop `Curator::new`/`new_with_policy` and `SessionStore::delete_if`
 T087's editor-smoke goal lookup export sessions from `nib.db` first, and keep
 both sides of the user-guide provider example; `task verify`, both release
 smokes and CI reran on eca593c.
+An independent read-only review of those post-review changes on 2026-10-25
+found no correctness bugs.
+Accepted low follow-up: when `export_sessions` fails inside an editor input
+function, its `exit 1` skips `abandon_tui_input`, so the case still fails but
+at the 40-second PTY kill rather than at once (the same pattern as
+`wait_for_goal_session`).
 The merged tree equals the verified head. Main delivery and publication remain
 separate.

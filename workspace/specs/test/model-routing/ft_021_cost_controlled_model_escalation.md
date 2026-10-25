@@ -426,5 +426,7 @@ The reviewed head was c25dce5. The
 later commits merge the updated FT-022 branch and route
 `test:model-escalation` through T087's focused-test guard; the full gates
 and CI reran on afda4bd.
+An independent read-only review of those post-review changes on 2026-10-25
+found no correctness bugs.
 The merged tree equals the verified head. Main delivery and publication remain
 separate.
