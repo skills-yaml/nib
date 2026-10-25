@@ -1081,14 +1081,6 @@ impl TranscriptViewport {
         self.pinned_to_tail
     }
 
-    pub fn status_label(&self) -> String {
-        if self.pinned_to_tail {
-            "tail:following".to_string()
-        } else {
-            format!("tail:paused row {}/{}", self.top_row() + 1, self.total_rows)
-        }
-    }
-
     pub(crate) fn bottom_row(&self) -> usize {
         self.total_rows.saturating_sub(self.page_rows)
     }

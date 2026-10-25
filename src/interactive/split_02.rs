@@ -1105,16 +1105,6 @@ impl SessionResolution {
         }
     }
 
-    pub fn notice(&self) -> String {
-        match self {
-            Self::Created(id) => format!("Started session {id}."),
-            Self::Resumed(id) => format!("Resumed session {id}."),
-            Self::RequestedMissing { requested, created } => {
-                format!("Session {requested} was not found; started session {created}.")
-            }
-        }
-    }
-
     pub fn tui_origin(&self) -> &'static str {
         match self {
             Self::Created(_) | Self::RequestedMissing { .. } => "new",

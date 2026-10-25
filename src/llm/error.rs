@@ -550,11 +550,6 @@ impl LlmError {
         redacted
     }
 
-    pub fn with_retry_after_seconds(mut self, seconds: u64) -> Self {
-        self.retry_after_seconds = (seconds <= 30).then_some(seconds);
-        self
-    }
-
     pub fn with_retry_attempts(mut self, attempts: crate::llm::RetryAttemptMetadata) -> Self {
         self.class = normalize_retry_backed_class(self.class, attempts);
         self.code = incident_code_for(self.class).to_string();

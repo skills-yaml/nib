@@ -200,11 +200,6 @@ pub struct AnthropicClient {
 }
 
 impl AnthropicClient {
-    pub fn new(model: String, api_keys: Vec<String>) -> Self {
-        Self::with_base_url(model, api_keys, "https://api.anthropic.com/v1/messages")
-            .expect("the built-in Anthropic endpoint must be valid")
-    }
-
     pub fn with_base_url(
         model: String,
         api_keys: Vec<String>,

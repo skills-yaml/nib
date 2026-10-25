@@ -524,14 +524,6 @@ impl ExactRunSteeringHandle {
         Ok(sequence)
     }
 
-    pub fn session_id(&self) -> &str {
-        &self.session_id
-    }
-
-    pub fn run_id(&self) -> &str {
-        &self.run_id
-    }
-
     pub(crate) fn fail_unaccounted(&self, reason: &str) -> Result<(), String> {
         let _submission_guard = self
             .submission_lock
@@ -1427,13 +1419,6 @@ pub enum QuestionOutcome {
 }
 
 impl QuestionOutcome {
-    pub fn answered_text(&self) -> Option<&str> {
-        match self {
-            Self::Answered(answer) | Self::ApprovedProposal(answer) => Some(answer.as_str()),
-            _ => None,
-        }
-    }
-
     #[cfg(test)]
     pub(crate) fn clarification_status(&self) -> ClarificationStatus {
         match self {
