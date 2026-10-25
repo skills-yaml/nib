@@ -135,7 +135,7 @@ fn terminal_retry_finishes_owner_cleanup_and_audits_exactly_once() {
     let holder = std::thread::spawn(move || {
         with_bounded_delegation_lock_in(
             &owner_lease_namespace_lock_path(&project_root),
-            &project_root.join(".nib"),
+            &crate::paths::NibPaths::project_state(&project_root),
             Duration::from_secs(30),
             |_, _| {
                 ready_tx.send(()).expect("publish held owner namespace");

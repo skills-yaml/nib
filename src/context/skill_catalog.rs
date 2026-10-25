@@ -52,7 +52,7 @@ pub fn skill_roots(project: &Path, config: &NibConfig, profile: &Profile) -> Vec
     let mut roots = repo_roots(project);
     roots.extend([
         project.join(".grok/skills"),
-        project.join(".nib/skills"),
+        crate::paths::NibPaths::project_skills(project),
         project.join(".skills"),
         project.join("skills"),
     ]);

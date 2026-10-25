@@ -924,6 +924,8 @@ pub enum SessionError {
     SensitiveSessionId,
     #[error("session file {path} is {size} bytes; maximum is {max} bytes")]
     FileTooLarge { path: String, size: u64, max: u64 },
+    #[error("session database error: {0}")]
+    Database(String),
 }
 
 pub(crate) fn validate_role_transition(
@@ -1121,6 +1123,29 @@ pub struct SessionStore {
     pub(crate) lock_timeout: Option<Duration>,
     pub(crate) lock_deadline: Option<Instant>,
     pub(crate) sensitive_values: Arc<Vec<String>>,
+    /// The session database scope, when this directory's sessions live in
+    /// `<user home>/nib.db` (T082 phase 4); otherwise they are JSON files.
+    pub(crate) database: Option<StoreDatabase>,
+}
+
+/// The session database and scope of a store whose sessions it holds.
+#[derive(Debug, Clone)]
+pub(crate) struct StoreDatabase {
+    pub(crate) database: Arc<database::SessionDatabase>,
+    pub(crate) scope: database::SessionScope,
+}
+
+impl StoreDatabase {
+    /// The database scope of `sessions_dir`, if its sessions live in the
+    /// session database.
+    pub(crate) fn for_sessions_dir(sessions_dir: &Path) -> Result<Option<Self>, String> {
+        let Some(scope) = database::SessionScope::for_sessions_dir(sessions_dir) else {
+            return Ok(None);
+        };
+        let database =
+            database::SessionDatabase::for_user_home().map_err(|error| error.to_string())?;
+        Ok(Some(Self { database, scope }))
+    }
 }
 
 pub(crate) struct SessionRunLease {
@@ -1164,8 +1189,69 @@ impl SessionRunLease {
 #[derive(Debug)]
 pub(crate) struct OpenedSession {
     pub(crate) session: Session,
-    pub(crate) file: File,
-    pub(crate) metadata: fs::Metadata,
+    pub(crate) handle: SessionHandle,
+    pub(crate) metadata: SessionRecordMetadata,
+}
+
+/// What a loaded session was read from: the open file of a JSON session, or
+/// the database row. A write is accepted only while it is still current.
+#[derive(Debug)]
+pub(crate) enum SessionHandle {
+    File(File),
+    Row(database::SessionRow),
+}
+
+impl SessionHandle {
+    pub(crate) fn file(&self) -> Option<&File> {
+        match self {
+            Self::File(file) => Some(file),
+            Self::Row(_) => None,
+        }
+    }
+
+    pub(crate) fn row(&self) -> Option<&database::SessionRow> {
+        match self {
+            Self::Row(row) => Some(row),
+            Self::File(_) => None,
+        }
+    }
+}
+
+/// The size and last change of a stored session (its file, or its row).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionRecordMetadata {
+    modified: Option<std::time::SystemTime>,
+    len: u64,
+}
+
+impl SessionRecordMetadata {
+    pub(crate) fn new(modified: Option<std::time::SystemTime>, len: u64) -> Self {
+        Self { modified, len }
+    }
+
+    pub(crate) fn from_file(metadata: &fs::Metadata) -> Self {
+        Self::new(metadata.modified().ok(), metadata.len())
+    }
+
+    /// When the session was last written.
+    pub fn modified(&self) -> std::io::Result<std::time::SystemTime> {
+        self.modified.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "the session has no modification time",
+            )
+        })
+    }
+
+    /// The stored size in bytes.
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    /// Whether the stored session is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

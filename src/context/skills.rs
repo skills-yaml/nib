@@ -193,7 +193,7 @@ const SKILL_DISCOVERY_LIMITS: SkillDiscoveryLimits = SkillDiscoveryLimits {
 
 fn default_skill_roots(project_path: &Path) -> Vec<PathBuf> {
     let mut roots = vec![
-        project_path.join(".nib").join("skills"),
+        crate::paths::NibPaths::project_skills(project_path),
         project_path.join(".skills"),
         project_path.join("skills"),
     ];

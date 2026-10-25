@@ -692,10 +692,12 @@ pub(crate) fn set_approval_mode(project_root: &Path, mode: &str) -> Result<Strin
                 .to_string(),
         );
     }
-    update_nib_config(project_root, {
+    // The preset is the user's choice for this project, kept in nib's user
+    // home: a project's own files cannot relax its approvals (T082).
+    crate::config::update_project_settings(project_root, {
         let selected = mode.clone();
-        move |config| {
-            config.approvals.mode = selected;
+        move |settings| {
+            settings.approvals.mode = Some(selected);
             Ok(())
         }
     })
@@ -1747,9 +1749,21 @@ pub fn set_active_model(project_root: &Path, model: &str) -> Result<String, Stri
     let provider = config.llm.get_active_provider();
     let selected_provider = provider.clone();
     let selected_model = model.to_string();
+    let configured = config.llm.providers.contains_key(&selected_provider);
     update_nib_config(project_root, move |config| {
         if let Some(entry) = config.llm.providers.get_mut(&selected_provider) {
             entry.model = selected_model;
+            Ok(())
+        } else if configured {
+            // The provider is configured for the user; the project keeps
+            // only its model choice.
+            config.llm.providers.insert(
+                selected_provider,
+                crate::config::ProviderEntry {
+                    model: selected_model,
+                    ..crate::config::ProviderEntry::default()
+                },
+            );
             Ok(())
         } else if selected_provider == "mock" {
             config

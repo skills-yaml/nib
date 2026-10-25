@@ -32,7 +32,8 @@ pub(crate) const MERGE_FAILED_STATUS: &str = "merge_failed";
 
 pub(crate) const NIB_EXCLUDE_PATHSPEC: &str = ":(exclude).nib";
 
-pub(crate) const NIB_DESCENDANTS_EXCLUDE_PATHSPEC: &str = ":(exclude).nib/**";
+pub(crate) const NIB_DESCENDANTS_EXCLUDE_PATHSPEC: &str =
+    crate::paths::PROJECT_DIR_EXCLUDE_PATHSPEC;
 
 pub(crate) const REPOSITORY_MERGE_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -1275,7 +1276,11 @@ impl SubagentOwnerLease {
         let timeout = deadline.saturating_duration_since(Instant::now());
         let visible = owner_lease_directory(project_root);
         let namespace_lock = owner_lease_namespace_lock_path(project_root);
-        let project_directory = crate::daemons::state::StableDirectory::open(project_root)?;
+        let state_parent = crate::state_migration::ensure_state_parent(
+            &crate::paths::NibPaths::project_state(project_root),
+        )
+        .map_err(|error| format!("subagent owner lease directory is unsafe: {error}"))?;
+        let project_directory = crate::daemons::state::StableDirectory::open(&state_parent)?;
         let mut deadline_guard = || {
             before_namespace_step()?;
             ensure_delegation_lock_deadline(deadline, &namespace_lock, Some(timeout))
@@ -1289,7 +1294,7 @@ impl SubagentOwnerLease {
         drop(visible_directory);
         with_delegation_lock_in_deadline(
             &namespace_lock,
-            &project_root.join(".nib"),
+            &crate::paths::NibPaths::project_state(project_root),
             deadline,
             Some(timeout),
             |_, deadline| {
@@ -1430,7 +1435,7 @@ impl SubagentOwnerLease {
         lease_id: &str,
     ) -> Result<OwnerLeaseProbe, String> {
         validate_execution_ownership(execution_generation, lease_id)?;
-        let nib = project_root.join(".nib");
+        let nib = crate::paths::NibPaths::project_state(project_root);
         let visible_root = owner_lease_directory(project_root);
         let anchor_directory = crate::daemons::state::StableDirectory::open(&nib)?;
         let visible_directory = match anchor_directory.entry_kind(&visible_root)? {
@@ -1549,11 +1554,9 @@ impl SubagentOwnerLease {
             .parent()
             .ok_or_else(|| "subagent owner lease anchor has no parent directory".to_string())?
             .to_path_buf();
-        let project_root = nib
-            .parent()
-            .ok_or_else(|| "subagent owner lease has no project root".to_string())?
-            .to_path_buf();
-        let lock_path = owner_lease_namespace_lock_path(&project_root);
+        // The anchor sits in the project's state directory, which may be in
+        // nib's user home rather than inside the project.
+        let lock_path = owner_lease_namespace_lock_path_in(&nib);
         match deadline {
             Some(deadline) => {
                 with_bounded_delegation_lock_in_until(&lock_path, &nib, deadline, |_, deadline| {
@@ -1663,7 +1666,7 @@ pub(crate) fn remove_persisted_owner_lease_until_with_guard(
 ) -> Result<(), String> {
     validate_execution_ownership(execution_generation, lease_id)?;
     ensure_subagent_reconciliation_deadline(requested_deadline)?;
-    let nib = project_root.join(".nib");
+    let nib = crate::paths::NibPaths::project_state(project_root);
     let lock_path = owner_lease_namespace_lock_path(project_root);
     let remove = |anchor_directory: &crate::daemons::state::StableDirectory,
                   lock_deadline: Instant| {
@@ -1985,11 +1988,14 @@ pub(crate) fn validate_execution_ownership(
 }
 
 pub(crate) fn owner_lease_directory(project_root: &Path) -> PathBuf {
-    project_root.join(".nib").join(OWNER_LEASE_DIRECTORY)
+    crate::paths::NibPaths::project_state(project_root).join(OWNER_LEASE_DIRECTORY)
 }
 
 pub(crate) fn owner_lease_namespace_lock_path(project_root: &Path) -> PathBuf {
-    project_root
-        .join(".nib")
-        .join(".nib-subagent-owner-namespace.lock")
+    owner_lease_namespace_lock_path_in(&crate::paths::NibPaths::project_state(project_root))
+}
+
+/// The owner lease namespace lock of the state directory `state`.
+pub(crate) fn owner_lease_namespace_lock_path_in(state: &Path) -> PathBuf {
+    state.join(".nib-subagent-owner-namespace.lock")
 }

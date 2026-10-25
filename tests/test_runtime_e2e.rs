@@ -2174,7 +2174,7 @@ async fn repeated_mixed_question_batches_stop_without_executing_either_tool() {
     );
     assert!(persisted.tool_calls.is_empty());
     assert!(!root.path().join("mixed-side-effect.txt").exists());
-    let worktrees = root.path().join(".nib/worktrees");
+    let worktrees = nib::paths::NibPaths::project_state(root.path()).join("worktrees");
     if worktrees.exists() {
         let sessions = worktrees.join("sessions");
         let entries = if sessions.exists() {
@@ -2230,7 +2230,7 @@ async fn mixed_skill_load_batches_stop_without_executing_either_tool() {
     );
     assert!(persisted.tool_calls.is_empty());
     assert!(!root.path().join("mixed-side-effect.txt").exists());
-    let worktrees = root.path().join(".nib/worktrees");
+    let worktrees = nib::paths::NibPaths::project_state(root.path()).join("worktrees");
     if worktrees.exists() {
         let sessions = worktrees.join("sessions");
         let entries = if sessions.exists() {
@@ -3974,7 +3974,9 @@ Do not inspect the repository without an explicit decision.
     assert_eq!(summary.tool_call_count, 1);
     assert!(!summary.bound_reached);
     assert_eq!(*calls.lock().unwrap(), ["list_directory".to_string()]);
-    assert!(!root.path().join(".nib/worktrees").exists());
+    assert!(!nib::paths::NibPaths::project_state(root.path())
+        .join("worktrees")
+        .exists());
 
     let persisted = store.load(&session.id).expect("denial audit");
     persisted
@@ -4703,7 +4705,13 @@ async fn mcp_delegation_is_permission_gated_dispatched_and_audited_over_stdio() 
         .iter()
         .any(|tool| tool["name"] == "fixture::nib_get_status"));
 
-    let store = SessionStore::new(root.path());
+    // T082: the audit store is the project's runtime store, in the session
+    // database of the user home, as `nib` opens it. The legacy in-project
+    // store (`SessionStore::new`) would be imported and moved away by the
+    // state migration the `nib mcp-server` child runs on its first stateful
+    // tool call, while this process still held it open.
+    let store = SessionStore::for_project(root.path()).expect("project session store");
+    assert!(store.database_path().is_some(), "sessions use the database");
     store.create_session_with_id("mcp-audit");
     let mut denied_executor = ToolExecutor::new(
         root.path().to_path_buf(),
@@ -4797,6 +4805,14 @@ async fn mcp_delegation_is_permission_gated_dispatched_and_audited_over_stdio() 
         );
     }
 
+    // The child's state migration found nothing to move: the audit never
+    // touched the project's legacy session directory.
+    assert!(!root.path().join(".nib/sessions").exists());
+    assert!(std::fs::read_dir(root.path().join(".nib"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .all(|entry| !entry.file_name().to_string_lossy().starts_with("legacy-")));
     let audit = store.load("mcp-audit").expect("MCP audit");
     assert_eq!(audit.tool_calls.len(), 3);
     assert_eq!(

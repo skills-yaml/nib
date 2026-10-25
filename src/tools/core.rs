@@ -580,7 +580,8 @@ async fn apply_patch(args: &Value, cwd: &Path) -> Result<Value, String> {
     if let Some(path) = paths.iter().find(|path| {
         path.split(['/', '\\']).any(|part| {
             let part = part.trim_end_matches(['.', ' ']);
-            part.eq_ignore_ascii_case(".nib") || part.eq_ignore_ascii_case(".git")
+            crate::paths::NibPaths::is_project_dir_name_ignore_case(part)
+                || part.eq_ignore_ascii_case(".git")
         })
     }) {
         return Err(format!(
@@ -635,7 +636,9 @@ async fn write_plan(args: &Value, cwd: &Path) -> Result<Value, String> {
         return Err("Plan content is empty".to_string());
     }
 
-    let nib_dir = cwd.join(".nib");
+    let nib_dir = crate::paths::NibPaths::project_state(cwd);
+    crate::state_migration::ensure_state_directory(&nib_dir)
+        .map_err(|e| format!("Failed to create plans dir: {e}"))?;
     let plans_dir = nib_dir.join("plans");
     tokio::fs::create_dir_all(&plans_dir)
         .await
@@ -1167,10 +1170,7 @@ async fn schedule(args: &Value, _cwd: &Path) -> Result<Value, String> {
     {
         return Err(format!("originating session not found: {session_id}"));
     }
-    let audit_path = sessions_dir
-        .parent()
-        .ok_or("originating session directory has no profile state parent")?
-        .join("daemons")
+    let audit_path = crate::daemons::workload::DurableTaskStore::profile_daemon_dir(&sessions_dir)?
         .join("audit.jsonl");
     let audit_log = crate::daemons::task::DaemonAuditLog::at_path(audit_path);
     let (project_root, profile_id) =

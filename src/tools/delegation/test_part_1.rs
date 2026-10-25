@@ -32,7 +32,8 @@ fn preparation_reconciliation_rejects_records_replacement_after_intent_open() {
     drop(intent);
     let original_before = directory_tree_snapshot(records.path());
     let records_path = records.path().to_path_buf();
-    let displaced = project_root.join(".nib/subagents.displaced-preparation");
+    let displaced = crate::paths::NibPaths::project_state(&project_root)
+        .join("subagents.displaced-preparation");
     let displaced_for_hook = displaced.clone();
     let replacement_before = std::sync::Arc::new(std::sync::Mutex::new(None));
     let replacement_capture = replacement_before.clone();
@@ -55,7 +56,9 @@ fn preparation_reconciliation_rejects_records_replacement_after_intent_open() {
     );
     assert_eq!(directory_tree_snapshot(&displaced), original_before);
     assert_eq!(
-        directory_tree_snapshot(&project_root.join(".nib/subagents")),
+        directory_tree_snapshot(
+            &crate::paths::NibPaths::project_state(&project_root).join("subagents")
+        ),
         replacement_before
             .lock()
             .expect("replacement snapshot lock")
@@ -206,10 +209,7 @@ async fn partial_cleanup_failures_retain_intent_until_restart_reconciles_last() 
                 .expect("decode retained audit intent");
                 assert_eq!(intent.phase, SpawnPreparationPhase::AuditPublished);
                 assert!(
-                    intent
-                        .audit_sessions_dir
-                        .join(format!("{}.json", intent.audit_session_id))
-                        .is_file(),
+                    session_exists_in(&intent.audit_sessions_dir, &intent.audit_session_id),
                     "audit cleanup failure was retried by Drop instead of restart"
                 );
             }
@@ -286,10 +286,7 @@ async fn post_audit_cancellation_cleanup_failure_retains_intent_until_restart() 
     .expect("decode retained post-audit intent");
     assert_eq!(intent.phase, SpawnPreparationPhase::AuditPublished);
     assert!(
-        intent
-            .audit_sessions_dir
-            .join(format!("{}.json", intent.audit_session_id))
-            .is_file(),
+        session_exists_in(&intent.audit_sessions_dir, &intent.audit_session_id),
         "post-audit cleanup failure was retried by Drop instead of restart"
     );
 
@@ -457,9 +454,19 @@ async fn expired_spawn_preparation_retains_intent_until_fresh_restart_cleanup() 
     let _reconciliation_timeout = SpawnReconciliationTimeoutGuard::set(Duration::from_secs(15));
 
     for cancellable in [false, true] {
-        for phase in ["worktree_reservation", "session_temp", "session_canonical"] {
+        for phase in [
+            "worktree_reservation",
+            "session_temp",
+            "session_canonical",
+            "session_row",
+        ] {
             let root = tempfile::tempdir().expect("git project");
             initialize_spawn_test_repository(root.path());
+            if matches!(phase, "session_temp" | "session_canonical") {
+                // The file publication phases of a profile whose sessions
+                // stay files; `session_row` is the session database's.
+                use_file_sessions(root.path());
+            }
             ensure_records_directory(root.path()).expect("authorized records namespace");
             let primed_owner = SubagentOwnerLease::create(root.path()).expect("prime owner");
             primed_owner.remove().expect("remove primed owner");
@@ -473,7 +480,8 @@ async fn expired_spawn_preparation_retains_intent_until_fresh_restart_cleanup() 
                 .sessions_dir()
                 .to_path_buf();
             let records = records_dir(root.path());
-            let ownership = root.path().join(".nib/worktree-ownership");
+            let ownership =
+                crate::paths::NibPaths::project_state(root.path()).join("worktree-ownership");
             let ownership_before = std::fs::read_dir(&ownership)
                 .expect("read primed worktree ownership")
                 .map(|entry| entry.expect("worktree ownership entry").file_name())
@@ -518,6 +526,13 @@ async fn expired_spawn_preparation_retains_intent_until_fresh_restart_cleanup() 
                                 .any(|entry| entry.file_name().to_string_lossy().ends_with(".json"))
                         })
                         .unwrap_or(false),
+                    "session_row" => {
+                        crate::session::StoreDatabase::for_sessions_dir(&sessions_for_hook)
+                            .ok()
+                            .flatten()
+                            .and_then(|store| store.database.list(&store.scope).ok())
+                            .is_some_and(|rows| !rows.is_empty())
+                    }
                     _ => unreachable!(),
                 };
                 if boundary_reached
@@ -579,6 +594,14 @@ async fn expired_spawn_preparation_retains_intent_until_fresh_restart_cleanup() 
                 &after,
                 &format!("{phase} cancellable={cancellable} restart changed namespace entries"),
             );
+            if let Some(store) =
+                crate::session::StoreDatabase::for_sessions_dir(&sessions).expect("database")
+            {
+                assert!(
+                    store.database.list(&store.scope).expect("rows").is_empty(),
+                    "{phase} cancellable={cancellable} left a prepared audit row"
+                );
+            }
         }
     }
 }
@@ -666,9 +689,9 @@ async fn direct_spawn_rejects_selected_state_replacement_after_audit_preflight_w
         vec![(PathBuf::from("sentinel"), b"replacement".to_vec())]
     );
     for path in [
-        root.path().join(".nib/subagents"),
-        root.path().join(".nib/subagent-owner-leases"),
-        root.path().join(".nib/worktrees/subagents"),
+        crate::paths::NibPaths::project_state(root.path()).join("subagents"),
+        crate::paths::NibPaths::project_state(root.path()).join("subagent-owner-leases"),
+        crate::paths::NibPaths::project_state(root.path()).join("worktrees/subagents"),
     ] {
         assert!(
             !path.exists(),
@@ -740,9 +763,9 @@ async fn cancellable_spawn_rejects_sessions_replacement_after_audit_preflight_wi
         vec![(PathBuf::from("sentinel"), b"replacement".to_vec())]
     );
     for path in [
-        root.path().join(".nib/subagents"),
-        root.path().join(".nib/subagent-owner-leases"),
-        root.path().join(".nib/worktrees/subagents"),
+        crate::paths::NibPaths::project_state(root.path()).join("subagents"),
+        crate::paths::NibPaths::project_state(root.path()).join("subagent-owner-leases"),
+        crate::paths::NibPaths::project_state(root.path()).join("worktrees/subagents"),
     ] {
         assert!(
             !path.exists(),
@@ -763,7 +786,8 @@ async fn direct_spawn_rejects_missing_profile_parent_appearance_after_audit_pref
     let root = tempfile::tempdir().expect("project root");
     let mut config = crate::config::NibConfig::default();
     crate::config::save_nib_config_full(root.path(), &mut config).expect("default config");
-    let profiles = root.path().join(".nib/profiles");
+    // The default profile state lives in the project's user-home state.
+    let profiles = crate::paths::NibPaths::project_state(root.path()).join("profiles");
     assert!(!profiles.exists(), "fixture profile parent starts absent");
 
     let profiles_for_hook = profiles.clone();
@@ -771,7 +795,7 @@ async fn direct_spawn_rejects_missing_profile_parent_appearance_after_audit_pref
         assert!(slot
             .borrow_mut()
             .replace(Box::new(move || {
-                std::fs::create_dir(&profiles_for_hook).expect("appearing profile parent");
+                std::fs::create_dir_all(&profiles_for_hook).expect("appearing profile parent");
                 std::fs::write(profiles_for_hook.join("sentinel"), b"appeared")
                     .expect("appearing parent sentinel");
             }))
@@ -799,9 +823,9 @@ async fn direct_spawn_rejects_missing_profile_parent_appearance_after_audit_pref
         "failed preflight must not add profile descendants"
     );
     for path in [
-        root.path().join(".nib/subagents"),
-        root.path().join(".nib/subagent-owner-leases"),
-        root.path().join(".nib/worktrees/subagents"),
+        crate::paths::NibPaths::project_state(root.path()).join("subagents"),
+        crate::paths::NibPaths::project_state(root.path()).join("subagent-owner-leases"),
+        crate::paths::NibPaths::project_state(root.path()).join("worktrees/subagents"),
     ] {
         assert!(
             !path.exists(),
@@ -813,10 +837,10 @@ async fn direct_spawn_rejects_missing_profile_parent_appearance_after_audit_pref
     std::fs::remove_dir_all(&profiles).expect("remove appearing profile parent");
     prepare_subagent_audit_target(&json!({}), root.path(), "fresh-missing-parent-retry")
         .expect("fresh retry creates the preflighted profile hierarchy");
-    assert!(root
-        .path()
-        .join(".nib/profiles/default/sessions/fresh-missing-parent-retry.json")
-        .is_file());
+    assert!(default_session_exists(
+        root.path(),
+        "fresh-missing-parent-retry"
+    ));
 }
 
 #[test]
@@ -919,17 +943,15 @@ fn terminal_scope_retirement_requires_a_locked_full_record_and_exact_authority()
     )
     .expect("write partial record");
     assert!(retire_terminal_process_scope(root.path(), &record).is_err());
-    assert!(root
-        .path()
-        .join(".nib/process-scopes")
+    assert!(crate::paths::NibPaths::project_state(root.path())
+        .join("process-scopes")
         .join(format!("{id}.json"))
         .exists());
     std::fs::remove_file(&path).expect("remove partial record");
     write_subagent_record(root.path(), &record).expect("full terminal record");
     assert!(retire_terminal_process_scope(root.path(), &record).expect("retire exact scope"));
-    assert!(!root
-        .path()
-        .join(".nib/process-scopes")
+    assert!(!crate::paths::NibPaths::project_state(root.path())
+        .join("process-scopes")
         .join(format!("{id}.json"))
         .exists());
 }
@@ -1055,9 +1077,8 @@ fn terminal_scope_retirement_rejects_mismatched_ownership_and_stale_snapshots() 
     })
     .expect("replacement record");
     assert!(retire_terminal_process_scope(root.path(), &stale).is_err());
-    assert!(root
-        .path()
-        .join(".nib/process-scopes")
+    assert!(crate::paths::NibPaths::project_state(root.path())
+        .join("process-scopes")
         .join(format!("{id}.json"))
         .exists());
 }
@@ -1102,9 +1123,8 @@ fn terminal_scope_retirement_retries_after_merge_status_advances() {
         get_subagent_record_unreconciled(root.path(), id).expect("advanced terminal record");
     assert!(retire_terminal_process_scope(root.path(), &advanced)
         .expect("retry retirement from merge-pending authority"));
-    assert!(!root
-        .path()
-        .join(".nib/process-scopes")
+    assert!(!crate::paths::NibPaths::project_state(root.path())
+        .join("process-scopes")
         .join(format!("{id}.json"))
         .exists());
 }
@@ -1211,9 +1231,8 @@ fn terminal_scope_retirement_accepts_exact_launch_abort_authority() {
 
     write_subagent_record(root.path(), &base).expect("terminal launch-abort record");
     assert!(retire_terminal_process_scope(root.path(), &base).expect("retire launch-aborted scope"));
-    assert!(!root
-        .path()
-        .join(".nib/process-scopes")
+    assert!(!crate::paths::NibPaths::project_state(root.path())
+        .join("process-scopes")
         .join(format!("{id}.json"))
         .exists());
 }
@@ -1308,9 +1327,8 @@ fn terminal_scope_retirement_rejects_forged_launch_abort_authority() {
         );
     }
 
-    assert!(root
-        .path()
-        .join(".nib/process-scopes")
+    assert!(crate::paths::NibPaths::project_state(root.path())
+        .join("process-scopes")
         .join(format!("{id}.json"))
         .exists());
 }

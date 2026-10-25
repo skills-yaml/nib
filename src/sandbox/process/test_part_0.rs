@@ -12,7 +12,10 @@ fn preexpired_open_does_not_create_managed_process_namespace() {
 
     assert!(error.contains("managed-process scope lock deadline elapsed"));
     assert!(
-        !root.path().join(".nib").exists(),
+        !root.path().join(".nib").exists()
+            && !crate::paths::NibPaths::project_state(root.path())
+                .join(SCOPE_DIRECTORY)
+                .exists(),
         "expired open created managed-process state"
     );
 }
@@ -148,7 +151,7 @@ fn supervisor_self_registration_is_exact_idempotent_and_late_cas_fails() {
 #[test]
 fn bounded_process_store_setup_retries_directory_and_lock_finalization() {
     let root = git_project();
-    let scope_directory = root.path().join(".nib").join(SCOPE_DIRECTORY);
+    let scope_directory = crate::paths::NibPaths::project_state(root.path()).join(SCOPE_DIRECTORY);
     // Leave enough setup headroom for a loaded hosted filesystem; the hook
     // deterministically expires the same absolute deadline once this phase exists.
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -180,9 +183,9 @@ fn bounded_process_store_setup_retries_directory_and_lock_finalization() {
     .expect("fresh deadline finalizes the retained process directory");
 
     let lock_root = git_project();
-    let protected = lock_root.path().join(".nib").join(SCOPE_DIRECTORY);
-    std::fs::create_dir(&protected).expect("process scope directory");
-    let lock_path = lock_root.path().join(".nib").join(SCOPE_STORE_LOCK);
+    let protected = crate::paths::NibPaths::project_state(lock_root.path()).join(SCOPE_DIRECTORY);
+    std::fs::create_dir_all(&protected).expect("process scope directory");
+    let lock_path = crate::paths::NibPaths::project_state(lock_root.path()).join(SCOPE_STORE_LOCK);
     let anchor_path =
         crate::daemons::state::daemon_lock_anchor_path(&lock_path).expect("process lock anchor");
     let deadline = Instant::now() + Duration::from_secs(2);

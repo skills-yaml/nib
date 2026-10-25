@@ -32,9 +32,15 @@ async fn production_delegation_rejects_windows_before_creating_state() {
     )
     .expect_err("Windows production delegation must fail closed");
     assert!(error.contains("unavailable on Windows"), "{error}");
-    assert!(!root.path().join(".nib/worktrees").exists());
-    assert!(!root.path().join(".nib/subagents").exists());
-    assert!(!root.path().join(".nib/process-scopes").exists());
+    assert!(!nib::paths::NibPaths::project_state(&root.path())
+        .join("worktrees")
+        .exists());
+    assert!(!nib::paths::NibPaths::project_state(&root.path())
+        .join("subagents")
+        .exists());
+    assert!(!nib::paths::NibPaths::project_state(&root.path())
+        .join("process-scopes")
+        .exists());
 }
 
 #[test]

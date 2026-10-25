@@ -700,6 +700,75 @@ fn only_nib_managed_worktrees_count_as_managed() {
     assert!(super::in_managed_worktree(&subagent));
 }
 
+/// T082 phase 3: a worktree nib creates in its user home is a managed
+/// worktree of its project (found through the project's identity record,
+/// not the worktree's own files), while the rest of nib's user home, with
+/// every project's state and the credentials, stays hidden.
+#[tokio::test]
+#[serial]
+async fn user_home_worktrees_are_managed_and_the_user_home_stays_hidden() {
+    if !strict_available() {
+        return;
+    }
+    let root = tempdir().unwrap();
+    let home = root.path().join("home");
+    let (project, _legacy_worktree) = project_fixture(&home);
+    crate::state_migration::migrate_project_state(&project, &[], &[]).expect("state record");
+    let state = crate::paths::NibPaths::user_state_dir(&project).unwrap();
+    let worktree = crate::paths::NibPaths::session_worktrees(&project).join("s3");
+    assert!(worktree.starts_with(&state));
+    std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+    git(
+        &project,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "nib/session/s3",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    let worktree = worktree.canonicalize().unwrap();
+    std::fs::write(state.join("secret.txt"), "state-secret\n").unwrap();
+    assert!(super::in_managed_worktree(&worktree));
+    assert!(ProjectMounts::resolve(&worktree, Some(&home.canonicalize().unwrap())).is_some());
+    let nib_home = crate::paths::NibPaths::user_home()
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    let args = build_bwrap_args("true", &project, &BoundaryConfig::default(), "restricted")
+        .expect("main checkout arguments");
+    assert!(args
+        .windows(2)
+        .any(|pair| pair == ["--tmpfs", nib_home.to_str().unwrap()]));
+
+    let _home = HomeGuard::set(home.as_os_str());
+    let command = [
+        "git status --short --branch | grep -q 'nib/session/s3'".to_string(),
+        "git log --oneline -1 | grep -q fixture".to_string(),
+        "printf change > edited.txt".to_string(),
+        denied(
+            &format!("cat {}/secret.txt", state.display()),
+            "no such file",
+        ),
+        denied(
+            &format!("cat {}/.nib/config.toml", project.display()),
+            "no such file",
+        ),
+    ]
+    .join(" && ");
+    assert_success(&run(&worktree, &command, &BoundaryConfig::default()).await);
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("edited.txt")).unwrap(),
+        "change"
+    );
+    // A command cannot run from the state itself.
+    let error = build_bwrap_args("true", &state, &BoundaryConfig::default(), "restricted")
+        .expect_err("state is not a workspace");
+    assert!(error.contains("nib runtime state"), "{error}");
+}
+
 /// T080 phase 5c: in the main checkout the working directory is writable,
 /// while the instruction files nib reads policy from stay read-only and
 /// cannot be removed or renamed away. Nothing above the working directory

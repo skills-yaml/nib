@@ -361,10 +361,12 @@ impl ProcessScopeStore {
             )
         })?;
         ensure_process_scope_deadline(lock_deadline)?;
-        let nib = project_root.join(".nib");
+        let nib = crate::paths::NibPaths::project_state(&project_root);
         let directory = nib.join(SCOPE_DIRECTORY);
         let directory_capability = if lock_deadline.is_some() {
-            let project_directory = crate::daemons::state::StableDirectory::open(&project_root)?;
+            let state_parent = crate::state_migration::ensure_state_parent(&nib)
+                .map_err(|error| format!("managed-process state root is unsafe: {error}"))?;
+            let project_directory = crate::daemons::state::StableDirectory::open(&state_parent)?;
             let mut setup_guard = || {
                 before_setup_step()?;
                 ensure_process_scope_deadline(lock_deadline)
@@ -381,7 +383,7 @@ impl ProcessScopeStore {
                 )
                 .map_err(|error| format!("managed-process scope directory is unsafe: {error}"))?
         } else {
-            crate::fs_security::ensure_directory_without_symlinks(&nib)
+            crate::state_migration::ensure_state_directory(&nib)
                 .map_err(|error| format!("managed-process state root is unsafe: {error}"))?;
             crate::fs_security::ensure_directory_without_symlinks(&directory)
                 .map_err(|error| format!("managed-process scope directory is unsafe: {error}"))?;
@@ -411,7 +413,8 @@ impl ProcessScopeStore {
     ) -> Result<Option<Self>, String> {
         ensure_process_scope_deadline(Some(deadline))?;
         records.verify_visible()?;
-        let expected_records = project_root.join(".nib").join("subagents");
+        let expected_records =
+            crate::paths::NibPaths::project_state(project_root).join("subagents");
         if records.path() != expected_records {
             return Err(
                 "managed-process records capability is bound to another project".to_string(),
@@ -565,9 +568,12 @@ impl ProcessScopeStore {
         if !project_root.is_absolute() {
             return Err("managed-process supervisor project root is not absolute".to_string());
         }
-        let project = crate::daemons::state::StableDirectory::open(project_root)?;
+        let nib_path = crate::paths::NibPaths::project_state(project_root);
+        let state_parent = nib_path
+            .parent()
+            .ok_or("managed-process state root has no parent")?;
+        let project = crate::daemons::state::StableDirectory::open(state_parent)?;
         ensure_process_scope_deadline(Some(deadline))?;
-        let nib_path = project_root.join(".nib");
         let nib = project.open_owned_child(&nib_path)?;
         ensure_process_scope_deadline(Some(deadline))?;
         let directory = nib_path.join(SCOPE_DIRECTORY);
@@ -1683,7 +1689,7 @@ impl ProcessScopeStore {
         operation: impl FnOnce(&crate::daemons::state::StableDirectory) -> Result<T, String>,
         mut before_setup_step: impl FnMut() -> Result<(), String>,
     ) -> Result<T, String> {
-        let lock = self.project_root.join(".nib").join(SCOPE_STORE_LOCK);
+        let lock = crate::paths::NibPaths::project_state(&self.project_root).join(SCOPE_STORE_LOCK);
         ensure_process_scope_deadline(Some(deadline))?;
         crate::daemons::state::with_file_lock_in_until_with_setup_hook(
             &lock,

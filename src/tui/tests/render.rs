@@ -1618,7 +1618,10 @@ fn tui_resolves_the_selected_profile_session_store() {
     save_nib_config_full(directory.path(), &mut config).expect("save config");
 
     let store = SessionStore::for_project(directory.path()).expect("profile store");
-    let expected = directory.path().join(".nib/profiles/workspace/sessions");
+    let expected = crate::paths::NibPaths::profile_sessions(
+        &directory.path().canonicalize().expect("project"),
+        "workspace",
+    );
     let actual_directory = crate::daemons::state::StableDirectory::open(store.sessions_dir())
         .expect("opened profile session store");
     let expected_directory = crate::daemons::state::StableDirectory::open(&expected)

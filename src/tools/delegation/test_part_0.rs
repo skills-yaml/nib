@@ -211,12 +211,8 @@ fn killed_fallback_preparation_is_reconciled_without_orphans() {
         intent.is_file(),
         "write-ahead intent precedes crash boundary"
     );
-    let audit_session = root
-        .path()
-        .join(".nib/profiles/default/sessions")
-        .join(format!("{subagent_id}.json"));
     assert!(
-        audit_session.is_file(),
+        default_session_exists(root.path(), &subagent_id),
         "audit leaf is published before crash"
     );
 
@@ -228,13 +224,15 @@ fn killed_fallback_preparation_is_reconciled_without_orphans() {
         "preparing intent is never public workload"
     );
     assert!(!intent.exists(), "reconciled intent removed last");
-    assert!(!audit_session.exists(), "exact prepared audit leaf removed");
+    assert!(
+        !default_session_exists(root.path(), &subagent_id),
+        "exact prepared audit leaf removed"
+    );
     assert!(!owner_lease_directory(root.path())
         .read_dir()
         .is_ok_and(|mut entries| entries.next().is_some()));
-    assert!(!root
-        .path()
-        .join(".nib/worktrees/subagents")
+    assert!(!crate::paths::NibPaths::project_state(root.path())
+        .join("worktrees/subagents")
         .join(&subagent_id)
         .exists());
 
@@ -286,9 +284,8 @@ fn killed_planned_intent_precedes_every_spawn_resource_and_reconciles() {
     let intent = spawn_preparation_directory_path(root.path()).join(format!("{id}.json"));
     assert!(intent.is_file(), "planned intent is durable");
     assert!(
-        !root
-            .path()
-            .join(".nib/worktrees/subagents")
+        !crate::paths::NibPaths::project_state(root.path())
+            .join("worktrees/subagents")
             .join(&id)
             .exists(),
         "planned boundary precedes worktree mutation"
@@ -300,11 +297,7 @@ fn killed_planned_intent_precedes_every_spawn_resource_and_reconciles() {
         "planned boundary precedes owner mutation"
     );
     assert!(
-        !root
-            .path()
-            .join(".nib/profiles/default/sessions")
-            .join(format!("{id}.json"))
-            .exists(),
+        !default_session_exists(root.path(), &id),
         "planned boundary precedes audit mutation"
     );
     child.kill().expect("kill planned child");
@@ -313,6 +306,15 @@ fn killed_planned_intent_precedes_every_spawn_resource_and_reconciles() {
         .expect("restart reconciliation")
         .is_empty());
     assert!(!intent.exists(), "planned intent reconciled last");
+}
+
+/// The tree of the profile directory a file-session profile configures
+/// (`.nib/profiles/default`), if it exists.
+fn configured_profile_tree(root: &Path) -> Option<Vec<(PathBuf, Vec<u8>)>> {
+    let profile_dir = root.join(".nib/profiles/default");
+    profile_dir
+        .exists()
+        .then(|| directory_tree_snapshot(&profile_dir))
 }
 
 #[cfg(any(unix, windows))]
@@ -336,6 +338,15 @@ fn spawn_intent_and_session_atomic_phase_crashes_reconcile_exactly() {
         ] {
             let root = tempfile::tempdir().expect("project root");
             initialize_spawn_test_repository(root.path());
+            if component == "sessions" {
+                // Sessions in the session database commit in one
+                // transaction; the file publication phases belong to a
+                // profile whose sessions stay files.
+                use_file_sessions(root.path());
+            }
+            // The profile directory a configured profile already has; any
+            // other profile/session tree is the transaction's own.
+            let profile_before = configured_profile_tree(root.path());
             let ready = root.path().join(format!("{category}-{phase}.ready"));
             let resume = root.path().join(format!("{category}-{phase}.resume"));
             let mut child =
@@ -383,23 +394,19 @@ fn spawn_intent_and_session_atomic_phase_crashes_reconcile_exactly() {
                 "{category}/{phase} preparation remained"
             );
             assert!(
-                !root
-                    .path()
-                    .join(".nib/worktrees/subagents")
+                !crate::paths::NibPaths::project_state(root.path())
+                    .join("worktrees/subagents")
                     .join(&id)
                     .exists(),
                 "{category}/{phase} worktree remained"
             );
             assert!(
-                !root
-                    .path()
-                    .join(".nib/profiles/default/sessions")
-                    .join(format!("{id}.json"))
-                    .exists(),
+                !default_session_exists(root.path(), &id),
                 "{category}/{phase} audit session remained"
             );
-            assert!(
-                !root.path().join(".nib/profiles/default").exists(),
+            assert_eq!(
+                configured_profile_tree(root.path()),
+                profile_before,
                 "{category}/{phase} left the transaction-owned profile/session directory tree"
             );
             let namespace = subagent_namespace_snapshot(root.path());
@@ -488,9 +495,8 @@ fn killed_fallback_namespace_phases_reconcile_exact_planned_artifacts() {
             !root.path().join(".nib/profiles").exists(),
             "{phase}: exact planned audit hierarchy is removed"
         );
-        assert!(!root
-            .path()
-            .join(".nib/worktrees/subagents")
+        assert!(!crate::paths::NibPaths::project_state(root.path())
+            .join("worktrees/subagents")
             .join(&subagent_id)
             .exists());
         assert!(!owner_lease_directory(root.path())
@@ -545,9 +551,9 @@ async fn direct_spawn_variants_reject_non_utf8_audit_target_before_any_partial_s
         non_utf8_state.join("sessions"),
         non_utf8_state.join("daemons"),
         non_utf8_state.join("managed-skills"),
-        root.path().join(".nib/subagents"),
-        root.path().join(".nib/subagent-owner-leases"),
-        root.path().join(".nib/worktrees/subagents"),
+        crate::paths::NibPaths::project_state(root.path()).join("subagents"),
+        crate::paths::NibPaths::project_state(root.path()).join("subagent-owner-leases"),
+        crate::paths::NibPaths::project_state(root.path()).join("worktrees/subagents"),
     ] {
         assert!(
             !path.exists(),
@@ -907,8 +913,8 @@ fn handoff_execution_evidence_requires_exact_committed_scope_authority() {
     let mut record = record_fixture(&project_root, &id, "running");
     record.execution_generation = Some(generation);
     record.owner_lease = Some(owner_plan.lease_id.clone());
-    let scope_path = project_root
-        .join(".nib/process-scopes")
+    let scope_path = crate::paths::NibPaths::project_state(&project_root)
+        .join("process-scopes")
         .join(format!("{id}.json"));
     let install = |scope: &crate::sandbox::process::ProcessScopeRecord| {
         std::fs::write(
@@ -1150,8 +1156,8 @@ fn legacy_preparation_schema_and_evidence_reject_v2_ready_without_mutation() {
     committed.launch_committed = Some(true);
     committed.updated_at = Utc::now();
     std::fs::write(
-        project_root
-            .join(".nib/process-scopes")
+        crate::paths::NibPaths::project_state(&project_root)
+            .join("process-scopes")
             .join(format!("{id}.json")),
         serde_json::to_vec_pretty(&committed).expect("encode committed scope"),
     )

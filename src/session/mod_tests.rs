@@ -35,6 +35,19 @@ fn session_namespace_shape(path: &Path) -> Vec<(std::ffi::OsString, u64)> {
     snapshot
 }
 
+/// Whether a prepared session is published in its store: a row of the
+/// session database, or a JSON file elsewhere.
+fn prepared_session_exists(sessions_dir: &Path, id: &str) -> bool {
+    match StoreDatabase::for_sessions_dir(sessions_dir).expect("session database") {
+        Some(store) => store
+            .database
+            .load(&store.scope, id)
+            .expect("load prepared session")
+            .is_some(),
+        None => sessions_dir.join(format!("{id}.json")).is_file(),
+    }
+}
+
 #[test]
 fn failed_preparation_preserves_a_concurrently_adopted_session_namespace() {
     let root = tempfile::tempdir().expect("project root");
@@ -67,9 +80,13 @@ fn failed_preparation_preserves_a_concurrently_adopted_session_namespace() {
         .cleanup(deadline)
         .expect("A leaf-only compensation");
 
+    assert!(
+        store_b.database.is_some(),
+        "the project's sessions live in the session database"
+    );
     assert_eq!(session_namespace_snapshot(&sessions_dir), committed_b);
     assert!(store_b.load_result("session-b").expect("load B").is_some());
-    assert!(!sessions_dir.join("session-a.json").exists());
+    assert!(!prepared_session_exists(&sessions_dir, "session-a"));
     assert!(sessions_dir.join(SESSION_DIRECTORY_IDENTITY_FILE).is_file());
 }
 
@@ -94,16 +111,19 @@ fn durable_planned_session_receipt_cleans_publication_before_identity_update() {
         .create_unpublished_session("planned-before-publication")
         .expect("publish planned session");
     let sessions_dir = preparation.store().sessions_dir().to_path_buf();
-    assert!(sessions_dir
-        .join("planned-before-publication.json")
-        .is_file());
+    assert!(preparation.store().database.is_some());
+    assert!(prepared_session_exists(
+        &sessions_dir,
+        "planned-before-publication"
+    ));
     drop(preparation.disarm());
 
     SessionStorePreparation::cleanup_durable(&receipt, deadline)
         .expect("restart cleans the exact planned publication");
-    assert!(!sessions_dir
-        .join("planned-before-publication.json")
-        .exists());
+    assert!(!prepared_session_exists(
+        &sessions_dir,
+        "planned-before-publication"
+    ));
     assert!(!sessions_dir.exists());
 }
 
@@ -1022,7 +1042,7 @@ fn session_publication_rechecks_deadline_at_the_commit_boundary() {
                 store.save_unlocked_with_deadline_and_commit_check(
                     directory,
                     &opened.session,
-                    Some(&opened.file),
+                    Some(&opened.handle),
                     Some(deadline),
                     || {
                         paused_namespace = Some(session_namespace_shape(store.sessions_dir()));
@@ -1643,7 +1663,7 @@ fn run_session_commit_child(root: &Path) {
             store.save_unlocked_with_commit_check(
                 directory,
                 &opened.session,
-                Some(&opened.file),
+                Some(&opened.handle),
                 || {
                     fs::write(&ready, b"ready")?;
                     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);

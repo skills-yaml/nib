@@ -878,9 +878,7 @@ async fn subagent_shutdown_joins_held_lock_reconciliation_before_returning() {
     drop(held);
     tokio::time::sleep(crate::tools::delegation::SUBAGENT_CANCELLATION_RECONCILIATION_TIMEOUT * 2)
         .await;
-    let record_path = root
-        .path()
-        .join(".nib")
+    let record_path = crate::paths::NibPaths::project_state(root.path())
         .join("subagents")
         .join(format!("{id}.json"));
     let persisted: crate::tools::delegation::SubagentRecord = serde_json::from_slice(
@@ -1003,7 +1001,8 @@ async fn direct_executor_uses_selected_profile_store_and_environment() {
         "profile-scoped"
     );
     let store = SessionStore::for_project(root.path()).expect("profile store");
-    let expected_sessions = root.path().join(".nib/profiles/workspace/sessions");
+    let expected_sessions =
+        crate::paths::NibPaths::profile_sessions(&root.path().canonicalize().unwrap(), "workspace");
     assert!(
         crate::fs_security::canonical_paths_match(store.sessions_dir(), &expected_sessions),
         "profile store {} does not match expected sessions path {}",
@@ -1025,11 +1024,8 @@ async fn direct_executor_uses_selected_profile_store_and_environment() {
     assert!(!root.path().join(".nib/sessions").exists());
     // T080 phase 5c: MCP-server calls always run in a session worktree,
     // never in the folder, and record no workspace on their session.
-    let worktrees = root
-        .path()
-        .canonicalize()
-        .unwrap()
-        .join(".nib/worktrees/sessions");
+    let worktrees = crate::paths::NibPaths::project_state(&root.path().canonicalize().unwrap())
+        .join("worktrees/sessions");
     assert!(store.list().into_iter().any(|id| {
         store.load(&id).is_some_and(|session| {
             session.workspace.is_none()
@@ -1167,7 +1163,10 @@ async fn status_rejects_credential_derived_identifiers_before_audit_or_reflectio
     }
 
     assert!(
-        !root.path().join(".nib").exists(),
+        !root.path().join(".nib").exists()
+            && !crate::paths::NibPaths::project_state(root.path())
+                .join("profiles")
+                .exists(),
         "rejected status calls must not initialize profile state or create audit sessions"
     );
 }
@@ -1223,7 +1222,10 @@ async fn schema_validation_errors_never_reflect_environment_credentials() {
     }
 
     assert!(
-        !root.path().join(".nib").exists(),
+        !root.path().join(".nib").exists()
+            && !crate::paths::NibPaths::project_state(root.path())
+                .join("profiles")
+                .exists(),
         "schema rejection must precede audit-session initialization"
     );
 }
@@ -1451,8 +1453,8 @@ async fn one_worker_postcommit_nib_run_cancellation_records_exactly_one_rich_aud
     }));
     let persisted: crate::tools::delegation::SubagentRecord = serde_json::from_slice(
         &std::fs::read(
-            root.path()
-                .join(".nib/subagents")
+            crate::paths::NibPaths::project_state(root.path())
+                .join("subagents")
                 .join(format!("{id}.json")),
         )
         .expect("persisted cancelled record"),

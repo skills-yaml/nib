@@ -120,29 +120,22 @@ fn parent_sigkill_after_ready_never_releases_worker_and_restart_cleans_everythin
     );
     assert!(!worktree.exists(), "restart left the prepared worktree");
     assert!(
-        !project
-            .path()
-            .join(".nib/profiles/default/sessions")
-            .join(format!("{id}.json"))
-            .exists(),
+        !default_session_exists(project.path(), &id),
         "restart left the prepared audit session"
     );
     wait_for_absence(
-        &project
-            .path()
-            .join(".nib/process-scopes")
+        &nib::paths::NibPaths::project_state(project.path())
+            .join("process-scopes")
             .join(format!("{id}.json")),
     );
     wait_for_absence(
-        &project
-            .path()
-            .join(".nib/process-scopes")
+        &nib::paths::NibPaths::project_state(project.path())
+            .join("process-scopes")
             .join(format!("{id}.cleanup.lease")),
     );
     assert!(
-        !project
-            .path()
-            .join(".nib/subagent-owner-leases")
+        !nib::paths::NibPaths::project_state(project.path())
+            .join("subagent-owner-leases")
             .join(format!(
                 "{}.lease",
                 record.owner_lease.expect("owner lease")
@@ -151,9 +144,8 @@ fn parent_sigkill_after_ready_never_releases_worker_and_restart_cleans_everythin
         "restart left owner authority"
     );
     assert!(
-        !project
-            .path()
-            .join(".nib/subagents/.preparations")
+        !nib::paths::NibPaths::project_state(project.path())
+            .join("subagents/.preparations")
             .join(format!("{id}.json"))
             .exists(),
         "restart retired external state before its preparation intent"
@@ -209,25 +201,18 @@ fn prepared_scope_restart_orders_late_supervisor_against_external_cleanup() {
         let record = read_persisted_record(project.path(), &id).expect("pending record");
         let worktree = record.worktree_path.clone();
         let owner_lease = record.owner_lease.clone().expect("owner lease");
-        let scope_path = project
-            .path()
-            .join(".nib/process-scopes")
+        let scope_path = nib::paths::NibPaths::project_state(project.path())
+            .join("process-scopes")
             .join(format!("{id}.json"));
-        let cleanup_lease_path = project
-            .path()
-            .join(".nib/process-scopes")
+        let cleanup_lease_path = nib::paths::NibPaths::project_state(project.path())
+            .join("process-scopes")
             .join(format!("{id}.cleanup.lease"));
-        let owner_path = project
-            .path()
-            .join(".nib/subagent-owner-leases")
+        let owner_path = nib::paths::NibPaths::project_state(project.path())
+            .join("subagent-owner-leases")
             .join(format!("{owner_lease}.lease"));
-        let audit_path = project
-            .path()
-            .join(".nib/profiles/default/sessions")
-            .join(format!("{id}.json"));
-        let intent_path = project
-            .path()
-            .join(".nib/subagents/.preparations")
+        let audit_exists = || default_session_exists(project.path(), &id);
+        let intent_path = nib::paths::NibPaths::project_state(project.path())
+            .join("subagents/.preparations")
             .join(format!("{id}.json"));
         let store = ProcessScopeStore::open(project.path()).expect("scope store");
         let prepared = store.load(&id).expect("prepared launch scope");
@@ -239,7 +224,7 @@ fn prepared_scope_restart_orders_late_supervisor_against_external_cleanup() {
         assert!(!cleanup_lease_path.exists());
         assert!(worktree.exists());
         assert!(owner_path.exists());
-        assert!(audit_path.exists());
+        assert!(audit_exists());
         assert!(intent_path.exists());
         assert!(!worker_started.exists());
 
@@ -256,10 +241,7 @@ fn prepared_scope_restart_orders_late_supervisor_against_external_cleanup() {
         assert!(!cleanup_lease_path.exists());
         assert!(!worktree.exists(), "restart left the prepared worktree");
         assert!(!owner_path.exists(), "restart left owner authority");
-        assert!(
-            !audit_path.exists(),
-            "restart left the prepared audit session"
-        );
+        assert!(!audit_exists(), "restart left the prepared audit session");
         assert!(!intent_path.exists(), "restart left preparation authority");
         assert!(
             !worker_started.exists(),
@@ -274,7 +256,7 @@ fn prepared_scope_restart_orders_late_supervisor_against_external_cleanup() {
                     && !cleanup_lease_path.exists()
                     && !worktree.exists()
                     && !owner_path.exists()
-                    && !audit_path.exists()
+                    && !audit_exists()
                     && !intent_path.exists(),
                 "late supervisor recreated or retained launch resources"
             );
@@ -316,9 +298,8 @@ async fn post_handoff_failures_never_publish_without_cleanup_proof() {
         assert_eq!(record.status, "failed");
         let store = ProcessScopeStore::open(unstarted.path()).expect("scope store");
         assert!(store.try_load(&id).expect("scope lookup").is_none());
-        assert!(!unstarted
-            .path()
-            .join(".nib/process-scopes")
+        assert!(!nib::paths::NibPaths::project_state(unstarted.path())
+            .join("process-scopes")
             .join(format!("{id}.cleanup.lease"))
             .exists());
     }
@@ -345,9 +326,8 @@ async fn post_handoff_failures_never_publish_without_cleanup_proof() {
     );
     let store = ProcessScopeStore::open(incomplete.path()).expect("scope store");
     wait_for_absence(
-        &incomplete
-            .path()
-            .join(".nib/process-scopes")
+        &nib::paths::NibPaths::project_state(incomplete.path())
+            .join("process-scopes")
             .join(format!("{incomplete_id}.json")),
     );
     assert!(store
@@ -378,9 +358,8 @@ async fn post_handoff_failures_never_publish_without_cleanup_proof() {
     );
     let store = ProcessScopeStore::open(body_only.path()).expect("scope store");
     wait_for_absence(
-        &body_only
-            .path()
-            .join(".nib/process-scopes")
+        &nib::paths::NibPaths::project_state(body_only.path())
+            .join("process-scopes")
             .join(format!("{body_id}.json")),
     );
     assert!(store.try_load(&body_id).expect("scope lookup").is_none());
@@ -420,15 +399,13 @@ async fn post_handoff_failures_never_publish_without_cleanup_proof() {
         );
         assert!(cleanup_proof(&record).is_none());
         wait_for_absence(
-            &completed
-                .path()
-                .join(".nib/process-scopes")
+            &nib::paths::NibPaths::project_state(completed.path())
+                .join("process-scopes")
                 .join(format!("{completed_id}.json")),
         );
         wait_for_absence(
-            &completed
-                .path()
-                .join(".nib/process-scopes")
+            &nib::paths::NibPaths::project_state(completed.path())
+                .join("process-scopes")
                 .join(format!("{completed_id}.cleanup.lease")),
         );
     }
@@ -509,21 +486,18 @@ async fn supervisor_rebinds_scope_deadlines_after_long_running_handoff() {
         let proof = cleanup_proof(&record).expect("exact cleanup proof");
         assert_eq!(proof["descendants_reaped"], true);
         wait_for_absence(
-            &project
-                .path()
-                .join(".nib/process-scopes")
+            &nib::paths::NibPaths::project_state(project.path())
+                .join("process-scopes")
                 .join(format!("{id}.json")),
         );
         wait_for_absence(
-            &project
-                .path()
-                .join(".nib/process-scopes")
+            &nib::paths::NibPaths::project_state(project.path())
+                .join("process-scopes")
                 .join(format!("{id}.cleanup.lease")),
         );
         wait_for_absence(
-            &project
-                .path()
-                .join(".nib/subagent-owner-leases")
+            &nib::paths::NibPaths::project_state(project.path())
+                .join("subagent-owner-leases")
                 .join(format!(
                     "{}.lease",
                     record
@@ -533,9 +507,8 @@ async fn supervisor_rebinds_scope_deadlines_after_long_running_handoff() {
                 )),
         );
         assert!(
-            !project
-                .path()
-                .join(".nib/subagents/.preparations")
+            !nib::paths::NibPaths::project_state(project.path())
+                .join("subagents/.preparations")
                 .join(format!("{id}.json"))
                 .exists(),
             "successful handoff retained preparation authority"
@@ -545,11 +518,7 @@ async fn supervisor_rebinds_scope_deadlines_after_long_running_handoff() {
             "terminal record lost its authoritative worktree"
         );
         assert!(
-            project
-                .path()
-                .join(".nib/profiles/default/sessions")
-                .join(format!("{id}.json"))
-                .is_file(),
+            default_session_exists(project.path(), &id),
             "terminal record lost its authoritative parent audit session"
         );
     }
@@ -640,15 +609,13 @@ async fn pre_running_supervisor_loss_reconciles_as_verified_launch_abort() {
     );
 
     wait_for_absence(
-        &project
-            .path()
-            .join(".nib/process-scopes")
+        &nib::paths::NibPaths::project_state(project.path())
+            .join("process-scopes")
             .join(format!("{id}.json")),
     );
     wait_for_absence(
-        &project
-            .path()
-            .join(".nib/process-scopes")
+        &nib::paths::NibPaths::project_state(project.path())
+            .join("process-scopes")
             .join(format!("{id}.cleanup.lease")),
     );
     assert!(!namespace_root.still_matches());
@@ -675,6 +642,17 @@ fn cleanup_proof(record: &SubagentRecord) -> Option<&serde_json::Value> {
             .get("ownership_reconciliation")
             .and_then(|evidence| evidence.get("cleanup_proof"))
     })
+}
+
+/// Whether the project's default profile holds session `id` (a row of the
+/// session database since T082), without creating anything.
+fn default_session_exists(project: &Path, id: &str) -> bool {
+    let root = project.canonicalize().expect("canonical project");
+    nib::session::SessionStore::session_exists_at(
+        &nib::paths::NibPaths::profile_sessions(&root, "default"),
+        id,
+    )
+    .expect("inspect the audit session")
 }
 
 fn git_project() -> TempDir {
@@ -710,7 +688,9 @@ fn run_git(root: &Path, args: &[&str]) {
 fn only_subagent_id(root: &Path) -> String {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if let Ok(entries) = std::fs::read_dir(root.join(".nib/subagents")) {
+        if let Ok(entries) =
+            std::fs::read_dir(nib::paths::NibPaths::project_state(root).join("subagents"))
+        {
             let ids: Vec<_> = entries
                 .filter_map(Result::ok)
                 .filter_map(|entry| {
@@ -765,7 +745,9 @@ fn wait_for_record(
 }
 
 fn read_persisted_record(root: &Path, id: &str) -> Result<SubagentRecord, String> {
-    let path = root.join(".nib/subagents").join(format!("{id}.json"));
+    let path = nib::paths::NibPaths::project_state(root)
+        .join("subagents")
+        .join(format!("{id}.json"));
     let bytes = std::fs::read(&path)
         .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
     serde_json::from_slice(&bytes)

@@ -394,7 +394,7 @@ fn choice_for_role(role: CommandRowRole) -> PlainCommandLine {
 }
 
 fn remembered_path(project_root: &Path) -> PathBuf {
-    project_root.join(".nib").join(REMEMBERED_FILE)
+    crate::paths::NibPaths::project_state(project_root).join(REMEMBERED_FILE)
 }
 
 fn canonical_project(project_root: &Path) -> Result<PathBuf, String> {
@@ -433,8 +433,8 @@ fn load_remembered(project_root: &Path) -> Vec<TerminalInvocation> {
 }
 
 fn write_remembered(project_root: &Path, rules: &[TerminalInvocation]) -> Result<(), String> {
-    let nib = project_root.join(".nib");
-    crate::fs_security::ensure_directory_without_symlinks(&nib)
+    let nib = crate::paths::NibPaths::project_state(project_root);
+    crate::state_migration::ensure_state_directory(&nib)
         .map_err(|error| format!("the command prefix was not saved: {error}"))?;
     let path = remembered_path(project_root);
     if let Ok(metadata) = std::fs::symlink_metadata(&path) {

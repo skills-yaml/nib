@@ -76,6 +76,10 @@ pub(crate) struct SessionPreparationReceipt {
     pub(crate) planned_session: Session,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) session_identity: Option<crate::fs_security::FileIdentitySnapshot>,
+    /// The generation of the published row, for a session directory whose
+    /// sessions live in the session database (T082 phase 4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) session_generation: Option<String>,
     pub(crate) created_identity: bool,
     pub(crate) created_directories: Vec<CreatedSessionDirectoryReceipt>,
 }
@@ -85,6 +89,11 @@ impl SessionPreparationReceipt {
         self.directory_identity
     }
 
+    /// Whether the receipt names a published session (file or row).
+    pub(crate) fn is_published(&self) -> bool {
+        self.session_identity.is_some() || self.session_generation.is_some()
+    }
+
     pub(crate) fn is_exact_publication_successor(&self, previous: &Self) -> bool {
         self.version == previous.version
             && self.sessions_dir == previous.sessions_dir
@@ -92,8 +101,8 @@ impl SessionPreparationReceipt {
             && self.sessions_directory_identity == previous.sessions_directory_identity
             && self.directory_identity == previous.directory_identity
             && self.planned_session == previous.planned_session
-            && previous.session_identity.is_none()
-            && self.session_identity.is_some()
+            && !previous.is_published()
+            && self.is_published()
             && self.created_identity == previous.created_identity
             && self.created_directories == previous.created_directories
     }
@@ -103,7 +112,7 @@ pub(crate) struct SessionStorePreparation {
     pub(crate) store: Option<SessionStore>,
     pub(crate) created_tree: Vec<CreatedSessionDirectoryTree>,
     pub(crate) created_identity_file: Option<File>,
-    pub(crate) created_session_file: Option<(PathBuf, File)>,
+    pub(crate) created_session_file: Option<(PathBuf, SessionHandle)>,
     pub(crate) planned_session: Option<Session>,
     pub(crate) parent_directory: Option<crate::daemons::state::StableDirectory>,
     pub(crate) directory: Option<crate::daemons::state::StableDirectory>,
@@ -190,9 +199,15 @@ impl SessionStorePreparation {
         let session_identity = self
             .created_session_file
             .as_ref()
-            .map(|(_, session_file)| crate::fs_security::file_identity_snapshot(session_file))
+            .and_then(|(_, handle)| handle.file())
+            .map(crate::fs_security::file_identity_snapshot)
             .transpose()
             .map_err(|error| error.to_string())?;
+        let session_generation = self
+            .created_session_file
+            .as_ref()
+            .and_then(|(_, handle)| handle.row())
+            .map(|row| row.generation.clone());
         let created_directories = self
             .created_tree
             .iter()
@@ -212,6 +227,7 @@ impl SessionStorePreparation {
             directory_identity,
             planned_session,
             session_identity,
+            session_generation,
             created_identity: self.created_identity_file.is_some(),
             created_directories,
         })
@@ -259,7 +275,6 @@ impl SessionStorePreparation {
         Self::cleanup_durable_with_guard(receipt, deadline, || Ok(()))
     }
 
-    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
     pub(crate) fn cleanup_durable_with_guard(
         receipt: &SessionPreparationReceipt,
         deadline: Instant,
@@ -274,6 +289,27 @@ impl SessionStorePreparation {
         let _namespace_guard =
             lock_session_mutex(&namespace_lock, &receipt.sessions_dir, Some(deadline))
                 .map_err(|error| error.to_string())?;
+        // A row of the session database does not live in the directory, so
+        // it is removed whether or not the directory is still there.
+        let store_database = StoreDatabase::for_sessions_dir(&receipt.sessions_dir)?;
+        if let Some(store) = &store_database {
+            validate_session_id(&receipt.session_id).map_err(|error| error.to_string())?;
+            if receipt.planned_session.id != receipt.session_id {
+                return Err(
+                    "prepared session plan does not match its durable session id".to_string(),
+                );
+            }
+            store
+                .database
+                .remove_prepared(
+                    &store.scope,
+                    &receipt.planned_session,
+                    receipt.session_generation.as_deref(),
+                )
+                .map_err(|error| error.to_string())?;
+            external_guard()?;
+            ensure_session_store_open_deadline(deadline)?;
+        }
         let metadata = match std::fs::symlink_metadata(&receipt.sessions_dir) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -315,6 +351,43 @@ impl SessionStorePreparation {
             external_guard()?;
             ensure_session_store_open_deadline(deadline)
         };
+        if store_database.is_none() {
+            Self::cleanup_durable_session_file(receipt, &directory, &session_path, &mut guard)?;
+        }
+        if !receipt.created_identity {
+            return guard();
+        }
+        let has_other_rows = match &store_database {
+            Some(store) => store
+                .database
+                .has_other_sessions(&store.scope, &receipt.session_id)
+                .map_err(|error| error.to_string())?,
+            None => false,
+        };
+        let mut has_shared_entries = has_other_rows;
+        directory
+            .for_each_entry_bounded(1_024, 255, |name| {
+                if name != std::ffi::OsStr::new(SESSION_DIRECTORY_IDENTITY_FILE) {
+                    has_shared_entries = true;
+                }
+                Ok(())
+            })
+            .map_err(|error| format!("scan prepared session namespace: {error}"))?;
+        if has_shared_entries {
+            return guard();
+        }
+        Self::cleanup_durable_namespace(receipt, directory, parent, &mut guard)
+    }
+
+    /// Removes the JSON session a durable preparation published, unless it
+    /// changed.
+    #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
+    fn cleanup_durable_session_file(
+        receipt: &SessionPreparationReceipt,
+        directory: &crate::daemons::state::StableDirectory,
+        session_path: &Path,
+        guard: &mut impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
         let expected_session_bytes = serde_json::to_vec_pretty(&receipt.planned_session)
             .map_err(|error| error.to_string())?;
         // Resolve the exact missing-only atomic transaction before deciding
@@ -322,17 +395,17 @@ impl SessionStorePreparation {
         // temporary artifact from being ignored while marker/ancestor cleanup
         // proceeds.
         directory.recover_exact_missing_publication_with_guard(
-            &session_path,
+            session_path,
             ".nib-session-",
             &expected_session_bytes,
-            &mut guard,
+            &mut *guard,
         )?;
         let deletion_quarantine = directory.deterministic_artifact_path(
-            &session_path,
+            session_path,
             ".nib-session-preparation-delete-",
             ".quarantine",
         )?;
-        let canonical_exists = directory.path_exists(&session_path)?;
+        let canonical_exists = directory.path_exists(session_path)?;
         let quarantine_exists = directory.path_exists(&deletion_quarantine)?;
         if canonical_exists && quarantine_exists {
             return Err(format!(
@@ -369,15 +442,15 @@ impl SessionStorePreparation {
             directory.remove_visible_file_if_matches_direct_with_guard(
                 &deletion_quarantine,
                 &quarantined,
-                &mut guard,
+                &mut *guard,
             )?;
         }
         if directory
-            .path_exists(&session_path)
+            .path_exists(session_path)
             .map_err(|error| format!("inspect prepared session leaf: {error}"))?
         {
             let session_file = directory
-                .open_read_write(&session_path)
+                .open_read_write(session_path)
                 .map_err(|error| format!("open prepared session leaf: {error}"))?;
             let observed = crate::fs_security::file_identity_snapshot(&session_file)
                 .map_err(|error| error.to_string())?;
@@ -409,7 +482,7 @@ impl SessionStorePreparation {
                         .map_err(|error| error.to_string())?;
                     guard()?;
                     directory
-                        .verify_file_identity(&session_path, &session_file)
+                        .verify_file_identity(session_path, &session_file)
                         .map_err(|error| {
                             format!("verify prepared session leaf after read: {error}")
                         })?;
@@ -423,27 +496,23 @@ impl SessionStorePreparation {
                 Some(_) => {}
             }
             directory.remove_file_if_matches_with_guard(
-                &session_path,
+                session_path,
                 &session_file,
                 ".nib-session-preparation-delete-",
-                &mut guard,
+                &mut *guard,
             )?;
         }
-        if !receipt.created_identity {
-            return guard();
-        }
-        let mut has_shared_entries = false;
-        directory
-            .for_each_entry_bounded(1_024, 255, |name| {
-                if name != std::ffi::OsStr::new(SESSION_DIRECTORY_IDENTITY_FILE) {
-                    has_shared_entries = true;
-                }
-                Ok(())
-            })
-            .map_err(|error| format!("scan prepared session namespace: {error}"))?;
-        if has_shared_entries {
-            return guard();
-        }
+        Ok(())
+    }
+
+    /// Removes the identity marker, its anchor and the directories a durable
+    /// preparation created, once nothing else uses them.
+    fn cleanup_durable_namespace(
+        receipt: &SessionPreparationReceipt,
+        directory: crate::daemons::state::StableDirectory,
+        parent: crate::daemons::state::StableDirectory,
+        guard: &mut impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
         let visible = receipt.sessions_dir.join(SESSION_DIRECTORY_IDENTITY_FILE);
         let anchor = session_directory_identity_anchor(&visible)?;
         let visible_file = directory
@@ -480,7 +549,7 @@ impl SessionStorePreparation {
                 &anchor,
                 identity_file,
                 ".nib-session-preparation-anchor-delete-",
-                &mut guard,
+                &mut *guard,
             )?;
         }
         if directory.path_exists(&visible)? {
@@ -491,7 +560,7 @@ impl SessionStorePreparation {
                 &visible,
                 identity_file,
                 ".nib-session-preparation-marker-delete-",
-                &mut guard,
+                &mut *guard,
             )?;
         }
         drop(directory);
@@ -534,7 +603,7 @@ impl SessionStorePreparation {
             parent.remove_empty_child_directory_if_matches_with_guard(
                 &created.path,
                 child,
-                &mut guard,
+                &mut *guard,
             )?;
         }
         guard()
@@ -776,7 +845,14 @@ impl SessionStorePreparation {
         let _namespace_guard =
             lock_session_mutex(&namespace_lock, &self.sessions_dir, Some(deadline))
                 .map_err(|error| error.to_string())?;
-        drop(self.store.take());
+        let store_database = self
+            .store
+            .take()
+            .and_then(|store| store.database)
+            .map_or_else(
+                || StoreDatabase::for_sessions_dir(&self.sessions_dir),
+                |store| Ok(Some(store)),
+            )?;
         if self.created_tree.is_empty()
             && self.created_identity_file.is_none()
             && self.created_session_file.is_none()
@@ -796,17 +872,13 @@ impl SessionStorePreparation {
             external_guard()?;
             ensure_session_store_open_deadline(deadline)
         };
-        if let Some((session_path, session_file)) = self.created_session_file.as_ref() {
-            directory.remove_file_if_matches_with_guard(
-                session_path,
-                session_file,
-                ".nib-session-preparation-delete-",
-                &mut guard,
-            )?;
+        if self.created_session_file.is_some() {
+            self.remove_created_session(store_database.as_ref(), directory, &mut guard)?;
             self.created_session_file.take();
         }
         if let Some(identity_file) = self.created_identity_file.as_ref() {
-            let mut has_shared_entries = false;
+            let mut has_shared_entries =
+                self.has_other_database_sessions(store_database.as_ref())?;
             directory.for_each_entry_bounded(1_024, 255, |name| {
                 if name != std::ffi::OsStr::new(SESSION_DIRECTORY_IDENTITY_FILE) {
                     has_shared_entries = true;
@@ -868,6 +940,64 @@ impl SessionStorePreparation {
         guard()?;
         self.armed = false;
         Ok(())
+    }
+}
+
+impl SessionStorePreparation {
+    /// Removes the session this preparation published (its file, or its row
+    /// of the session database), unless it changed.
+    fn remove_created_session(
+        &self,
+        store_database: Option<&StoreDatabase>,
+        directory: &crate::daemons::state::StableDirectory,
+        guard: &mut impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let Some((session_path, handle)) = self.created_session_file.as_ref() else {
+            return Ok(());
+        };
+        match (handle, store_database, &self.planned_session) {
+            (SessionHandle::File(session_file), None, _) => directory
+                .remove_file_if_matches_with_guard(
+                    session_path,
+                    session_file,
+                    ".nib-session-preparation-delete-",
+                    guard,
+                ),
+            (SessionHandle::Row(row), Some(store), Some(planned)) => {
+                guard()?;
+                store
+                    .database
+                    .remove_prepared(&store.scope, planned, Some(&row.generation))
+                    .map_err(|error| error.to_string())?;
+                guard()
+            }
+            _ => Err(format!(
+                "prepared session does not match its store and was preserved: {}",
+                session_path.display()
+            )),
+        }
+    }
+
+    /// Whether the session database holds sessions of this namespace other
+    /// than the planned one: another spawn adopted the namespace.
+    fn has_other_database_sessions(
+        &self,
+        store_database: Option<&StoreDatabase>,
+    ) -> Result<bool, String> {
+        let Some(store) = store_database else {
+            return Ok(false);
+        };
+        match &self.planned_session {
+            Some(planned) => store
+                .database
+                .has_other_sessions(&store.scope, &planned.id)
+                .map_err(|error| error.to_string()),
+            None => Ok(!store
+                .database
+                .list(&store.scope)
+                .map_err(|error| error.to_string())?
+                .is_empty()),
+        }
     }
 }
 
@@ -1258,6 +1388,7 @@ impl SessionDirectoryPreflight {
             if let Some(worktree) = worktree {
                 worktree.verify_owned_namespace()?;
             }
+            let database = StoreDatabase::for_sessions_dir(&sessions_dir)?;
             external_guard()?;
             Ok(SessionStore {
                 sessions_dir,
@@ -1268,6 +1399,7 @@ impl SessionDirectoryPreflight {
                 lock_timeout: None,
                 lock_deadline: Some(deadline),
                 sensitive_values: Arc::new(sensitive_values),
+                database,
             })
         })();
         drop(namespace_guard);

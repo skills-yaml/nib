@@ -13,8 +13,7 @@ pub(crate) fn confirm_no_legacy_subagent_processes_with_scan_hook(
     let project_root = canonical_project_root(project_root)?;
     let deadline = Instant::now() + SUBAGENT_RECORD_LOCK_TIMEOUT;
     let records = open_or_create_records_directory(&project_root, Some(deadline))?;
-    let lock_path = project_root
-        .join(".nib")
+    let lock_path = crate::paths::NibPaths::project_state(&project_root)
         .join(".subagent-legacy-lock-migration.lock");
     with_bounded_delegation_lock_in_until(
         &lock_path,
@@ -91,8 +90,7 @@ pub(crate) fn migrate_legacy_record_locks_with_scan_hook(
     mut after_scan: impl FnMut(usize) -> Result<(), String>,
 ) -> Result<(), String> {
     ensure_subagent_reconciliation_deadline(deadline)?;
-    let lock_path = project_root
-        .join(".nib")
+    let lock_path = crate::paths::NibPaths::project_state(project_root)
         .join(".subagent-legacy-lock-migration.lock");
     match deadline {
         Some(deadline) => with_bounded_delegation_lock_in_until(
@@ -765,17 +763,23 @@ pub(crate) fn validate_record_worktree(
         .worktree_path
         .canonicalize()
         .map_err(|error| format!("subagent worktree is unavailable: {error}"))?;
-    let allowed = project_root
-        .join(".nib")
-        .join("worktrees")
-        .join("subagents")
-        .canonicalize()
-        .map_err(|error| format!("subagent worktree root is unavailable: {error}"))?;
-    if !worktree.starts_with(&allowed) {
+    // Worktrees created before T082 stay in `<project>/.nib/worktrees`.
+    let roots = crate::paths::NibPaths::subagent_worktree_roots(project_root);
+    let allowed: Vec<PathBuf> = roots
+        .iter()
+        .filter_map(|root| root.canonicalize().ok())
+        .collect();
+    if allowed.is_empty() {
+        return Err(format!(
+            "subagent worktree root is unavailable: {}",
+            roots[0].display()
+        ));
+    }
+    if !allowed.iter().any(|root| worktree.starts_with(root)) {
         return Err(format!(
             "subagent worktree {} is outside {}",
             worktree.display(),
-            allowed.display()
+            roots[0].display()
         ));
     }
     Ok(())

@@ -20,6 +20,11 @@ The `nib` binary contains everything required: CLI, TUI, configuration, tool exe
   `async-trait` is used for the canonical `LlmProvider` abstraction; `LlmClient` is a
   compatibility re-export of that same trait, not a second contract.
 - **Data Serialization**: `serde` and `serde_json` for LLM APIs, profile-scoped session storage, daemon state, and tool calling formats.
+- **Session Database**: `rusqlite` with the `bundled` feature (SQLite compiled from
+  C sources into the binary on Linux, macOS and Windows; no system library) stores
+  the sessions of the user home in `~/.nib/nib.db` (WAL, `synchronous=FULL`,
+  versioned schema migrations). Recorded by T082 with the user's approval
+  (2026-10-22); other persistence stays `serde` files.
 - **Error Handling**: `thiserror` for robust error modeling.
 - **Sandboxing**: Sessions work in the user's folder by default; Git worktrees isolate
   sessions on request or when instructions require it, and always isolate subagents,

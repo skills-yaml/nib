@@ -1,4 +1,5 @@
-//! File-based session persistence under the active profile's sessions directory.
+//! Session persistence: the session database of the user home (T082 phase
+//! 4) or, for session directories outside it, JSON files.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,7 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 use uuid::Uuid;
 
+pub(crate) mod database;
 pub mod memory;
 pub mod presence;
 pub(crate) mod question_forms;
@@ -49,8 +51,8 @@ pub use split_00::{
     VerificationObligation,
 };
 pub use split_01::{
-    QueuedFollowUp, Session, SessionDeleteOutcome, SessionError, SessionEvent, SessionStore,
-    SessionWorkspace, SkillUsageRecord, WorkspaceMode,
+    QueuedFollowUp, Session, SessionDeleteOutcome, SessionError, SessionEvent,
+    SessionRecordMetadata, SessionStore, SessionWorkspace, SkillUsageRecord, WorkspaceMode,
 };
 
 #[cfg(test)]

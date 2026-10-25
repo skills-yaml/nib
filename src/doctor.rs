@@ -8,8 +8,9 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use nib::config::{
-    config_paths, load_nib_config_full_with_source, update_nib_config_conditionally,
-    ConfigMutation, LlmApiMode, NibConfig, ProviderEntry, ReasoningEffort,
+    config_paths, load_nib_config_full_with_source, load_project_settings, project_settings_path,
+    update_project_settings, update_user_config, user_config_path, LlmApiMode, NibConfig,
+    ProviderEntry, ReasoningEffort,
 };
 use nib::context::select_profile_skills;
 use nib::daemons::cron::Cron;
@@ -18,6 +19,7 @@ use nib::integrations::mcp::McpManager;
 use nib::llm::factory::{provider_diagnostics, provider_ready, validate_provider_endpoints};
 use nib::profile::ProfileRegistry;
 use nib::sandbox;
+use nib::state_migration::relink::StateLinkKind;
 use nib::tools::executor::ApprovalHandler;
 use nib::tools::models::ApprovalDecision;
 use nib::tools::{PermissionLevel, ToolCall, ToolExecutor};
@@ -93,24 +95,61 @@ pub struct DoctorArgs {
     /// Attest that every prior nib binary is stopped and disabled, then migrate legacy subagent locks
     #[arg(long, requires = "fix")]
     pub confirm_no_legacy_processes: bool,
+
+    /// Move the nib state of the folder this project was moved from (its old
+    /// path, or the state key doctor lists) to this folder
+    #[arg(long, value_name = "OLD_FOLDER", requires = "fix")]
+    pub relink: Option<String>,
 }
 
 #[cfg(test)]
 pub fn run_doctor(project: &Path) -> bool {
-    run_doctor_inner(project, false, false)
+    run_doctor_with_args(project, &DoctorArgs::default())
 }
 
 pub fn run_doctor_with_args(project: &Path, args: &DoctorArgs) -> bool {
+    println!("nib doctor");
+    println!("==========");
+    println!("Build: {}", crate::version::version_display());
+    println!("LLM runtime: native Rust");
+    if let Some(from) = &args.relink {
+        print!("Re-linking nib state of {from}... ");
+        match nib::state_migration::relink::relink(project, from) {
+            Ok(outcome) => {
+                println!(
+                    "FIXED ({} sessions moved; state in {})",
+                    outcome.sessions_moved,
+                    outcome.state_dir.display()
+                );
+                for replaced in &outcome.replaced {
+                    println!(
+                        "  This folder's own earlier state was kept in {}",
+                        replaced.display()
+                    );
+                }
+                if let Some(receipts) = &outcome.receipts {
+                    println!(
+                        "  Worktree receipts naming the old folder were kept in {}",
+                        receipts.display()
+                    );
+                }
+                if let Some(repair) = &outcome.worktree_repair {
+                    println!("  {repair}");
+                }
+            }
+            Err(error) => {
+                println!("FAILED ({error})");
+                println!("==========");
+                println!("Doctor summary: Some checks FAILED.");
+                return false;
+            }
+        }
+    }
     run_doctor_inner(project, args.fix, args.confirm_no_legacy_processes)
 }
 
 #[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn run_doctor_inner(project: &Path, fix: bool, confirm_no_legacy_processes: bool) -> bool {
-    println!("nib doctor");
-    println!("==========");
-    println!("Build: {}", crate::version::version_display());
-    println!("LLM runtime: native Rust");
-
     if fix {
         print!("Applying requested fixes... ");
         match repair_openai_transport(project) {
@@ -222,6 +261,15 @@ fn run_doctor_inner(project: &Path, fix: bool, confirm_no_legacy_processes: bool
         paths.toml.display(),
         paths.toml.exists()
     );
+    for (label, path) in [
+        ("User config", user_config_path()),
+        ("Project user settings", project_settings_path(project)),
+    ] {
+        match path {
+            Some(path) => println!("  {label}: {} (exists: {})", path.display(), path.exists()),
+            None => println!("  {label}: unavailable (set NIB_HOME or HOME)"),
+        }
+    }
 
     // 2. Git / Worktree availability
     print!("Checking git/worktree... ");
@@ -340,6 +388,8 @@ fn run_doctor_inner(project: &Path, fix: bool, confirm_no_legacy_processes: bool
         }
     };
 
+    print_layout(project);
+
     // 5. Skills Discoverability
     print!("Checking Skills discoverability... ");
     let mut shared_skill_paths = BTreeSet::new();
@@ -411,11 +461,19 @@ fn run_doctor_inner(project: &Path, fix: bool, confirm_no_legacy_processes: bool
             match (writable, session_store.list_result()) {
                 (true, Ok(session_ids)) => {
                     println!("OK (writable)");
-                    println!(
-                        "  Sessions: {} in {}",
-                        session_ids.len(),
-                        session_store.sessions_dir().display()
-                    );
+                    match session_store.database_path() {
+                        Some(database) => println!(
+                            "  Sessions: {} in {} (session directory {})",
+                            session_ids.len(),
+                            database.display(),
+                            session_store.sessions_dir().display()
+                        ),
+                        None => println!(
+                            "  Sessions: {} in {}",
+                            session_ids.len(),
+                            session_store.sessions_dir().display()
+                        ),
+                    }
                 }
                 (writable, listing) => {
                     println!("FAILED");
@@ -513,6 +571,131 @@ fn run_doctor_inner(project: &Path, fix: bool, confirm_no_legacy_processes: bool
     all_passed
 }
 
+/// Reports where this project's nib files are (T082): the user home, the
+/// session database, the runtime state, older files left in the project and
+/// other states this folder may belong to. Nothing here fails the doctor.
+fn print_layout(project: &Path) {
+    print!("Checking nib layout... ");
+    let report = match nib::state_migration::relink::layout_report(project) {
+        Ok(report) => report,
+        Err(error) => {
+            println!("WARNING ({error})");
+            return;
+        }
+    };
+    let pending = report.user_home.is_some() && !report.state_in_user_home;
+    let interrupted = report.state_status.as_deref() == Some("moving");
+    let attention = pending
+        || interrupted
+        || !report.not_imported.is_empty()
+        || report.candidates.iter().any(|candidate| {
+            matches!(
+                candidate.kind,
+                StateLinkKind::Moved | StateLinkKind::Interrupted
+            )
+        });
+    println!("{}", if attention { "WARNING" } else { "OK" });
+    match &report.user_home {
+        Some(home) => println!("  User home: {} (NIB_HOME overrides)", home.display()),
+        None => println!("  User home: unavailable (set NIB_HOME or HOME)"),
+    }
+    match (&report.database, report.sessions) {
+        (Some(database), Some(sessions)) => println!(
+            "  Session database: {} ({sessions} sessions of this folder)",
+            database.display()
+        ),
+        (Some(database), None) => println!("  Session database: {}", database.display()),
+        (None, _) => println!("  Session database: not created yet"),
+    }
+    println!(
+        "  Runtime state: {}{}",
+        report.state_dir.display(),
+        if pending {
+            " (the project's .nib; it moves to the user home once it is idle)"
+        } else if interrupted {
+            " (an interrupted move resumes the next time nib starts)"
+        } else {
+            ""
+        }
+    );
+    for line in &report.legacy {
+        println!("  Legacy: {line}");
+    }
+    print_kept_files(&report);
+    // States of deleted folders accumulate; name a few of them.
+    const MAX_ORPHANED_LINES: usize = 3;
+    let orphaned = report
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.kind == StateLinkKind::Orphaned)
+        .count();
+    let mut orphaned_listed = 0;
+    for candidate in &report.candidates {
+        if candidate.kind == StateLinkKind::Orphaned {
+            orphaned_listed += 1;
+            if orphaned_listed > MAX_ORPHANED_LINES {
+                continue;
+            }
+        }
+        let root = candidate.recorded_root.display();
+        match candidate.kind {
+            StateLinkKind::Moved | StateLinkKind::Orphaned => println!(
+                "  {} {root} no longer exists; its nib state ({}, {} sessions) is still in {}. If this project was moved from there, run `nib doctor --fix --relink {root}`.",
+                if candidate.kind == StateLinkKind::Moved {
+                    "Moved?"
+                } else {
+                    "Orphaned:"
+                },
+                candidate.key,
+                candidate.sessions,
+                candidate.state_dir.display()
+            ),
+            StateLinkKind::Copied => println!(
+                "  Copy of {root}? nib keeps separate state for each folder; this one has its own."
+            ),
+            StateLinkKind::Interrupted => println!(
+                "  A re-link from {} to this folder was interrupted: run `nib doctor --fix --relink {}` to finish it.",
+                candidate.state_dir.display(),
+                candidate.key
+            ),
+        }
+    }
+    if orphaned > MAX_ORPHANED_LINES {
+        println!(
+            "  ... and {} more states of folders that no longer exist",
+            orphaned - MAX_ORPHANED_LINES
+        );
+    }
+}
+
+/// The session files the migration could not import and the states a
+/// re-link kept aside, from the layout report.
+fn print_kept_files(report: &nib::state_migration::relink::LayoutReport) {
+    const MAX_NOT_IMPORTED_LINES: usize = 5;
+    for path in report.not_imported.iter().take(MAX_NOT_IMPORTED_LINES) {
+        println!(
+            "  Not imported: {} is not in the session database; it is kept only in this legacy copy",
+            path.display()
+        );
+    }
+    if report.not_imported.len() > MAX_NOT_IMPORTED_LINES {
+        println!(
+            "  ... and {} more session files that were not imported",
+            report.not_imported.len() - MAX_NOT_IMPORTED_LINES
+        );
+    }
+    for aside in &report.asides {
+        let key = aside
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        println!(
+            "  Kept aside: {} holds the state this folder had before a re-link replaced it. To bring it back, run `nib doctor --fix --relink {key}`.",
+            aside.display()
+        );
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CanonicalOpenAiBase {
     RegisteredDefault,
@@ -555,7 +738,7 @@ fn openai_transport_repair_needed(config: &NibConfig) -> bool {
 }
 
 fn check_managed_session_worktrees(project: &Path) -> Result<usize, String> {
-    let directory = project.join(".nib/worktree-ownership");
+    let directory = nib::paths::NibPaths::project_state(project).join("worktree-ownership");
     match fs::symlink_metadata(&directory) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
@@ -632,23 +815,24 @@ fn check_owned_session_receipt(
             "worktree",
             "worktree_path",
             "worktree_identity",
-            project.join(".nib/worktrees/sessions"),
+            // Legacy session worktrees stay in `<project>/.nib/worktrees`.
+            nib::paths::NibPaths::session_worktree_roots(project),
             true,
         ),
         (
             "Git registration",
             "registration_path",
             "registration_identity",
-            git_common.join("worktrees"),
+            vec![git_common.join("worktrees")],
             true,
         ),
     ];
-    for (label, path_key, identity_key, parent, directory) in paths {
+    for (label, path_key, identity_key, parents, directory) in paths {
         let path = receipt[path_key]
             .as_str()
             .ok_or_else(|| format!("session {session}: {label} path is missing"))?;
         let path = Path::new(path);
-        if !path.starts_with(&parent)
+        if !parents.iter().any(|parent| path.starts_with(parent))
             || path
                 .components()
                 .any(|part| matches!(part, std::path::Component::ParentDir))
@@ -708,25 +892,59 @@ fn check_receipt_artifact(
     Ok(())
 }
 
+/// Switches the effective OpenAI provider to the Responses API where its
+/// transport is configured: the user's settings for this project when they
+/// configure OpenAI, else the user configuration. A project's own
+/// preferences cannot hold a transport (T082).
 fn repair_openai_transport(project: &Path) -> Result<bool, String> {
-    update_nib_config_conditionally(project, |config| {
-        if !openai_transport_repair_needed(config) {
-            return Ok(ConfigMutation::Unchanged(false));
-        }
-        let entry = config
-            .llm
-            .providers
-            .get_mut("openai")
-            .ok_or_else(|| "active OpenAI provider disappeared during repair".to_string())?;
-        let base = canonical_openai_base(entry)
-            .ok_or_else(|| "OpenAI endpoint changed during repair".to_string())?;
-        entry.api = Some(LlmApiMode::Responses);
-        if base == CanonicalOpenAiBase::ChatCompletions {
-            entry.base_url = Some("https://api.openai.com/v1".to_string());
-        }
-        Ok(ConfigMutation::Changed(true))
-    })
-    .map_err(|error| error.to_string())
+    let (config, _) =
+        load_nib_config_full_with_source(project).map_err(|error| error.to_string())?;
+    if !openai_transport_repair_needed(&config) {
+        return Ok(false);
+    }
+    let entry = config
+        .llm
+        .providers
+        .get("openai")
+        .ok_or_else(|| "active OpenAI provider disappeared during repair".to_string())?;
+    let base = canonical_openai_base(entry)
+        .ok_or_else(|| "OpenAI endpoint changed during repair".to_string())?;
+    let base_url = (base == CanonicalOpenAiBase::ChatCompletions)
+        .then(|| "https://api.openai.com/v1".to_string());
+    let settings = load_project_settings(project).map_err(|error| error.to_string())?;
+    if settings.llm.providers.contains_key("openai") {
+        update_project_settings(project, move |settings| {
+            let openai = settings
+                .llm
+                .providers
+                .entry("openai".to_string())
+                .or_default();
+            openai.api = Some(LlmApiMode::Responses);
+            if base_url.is_some() {
+                openai.base_url = base_url;
+            }
+            Ok(())
+        })
+    } else {
+        let model = entry.model.clone();
+        update_user_config(move |config| {
+            let openai = config
+                .llm
+                .providers
+                .entry("openai".to_string())
+                .or_insert_with(|| ProviderEntry {
+                    model,
+                    ..ProviderEntry::default()
+                });
+            openai.api = Some(LlmApiMode::Responses);
+            if base_url.is_some() {
+                openai.base_url = base_url;
+            }
+            Ok(())
+        })
+    }
+    .map_err(|error| error.to_string())?;
+    Ok(true)
 }
 
 fn active_provider_diagnostic_lines(config: &NibConfig) -> Result<Vec<String>, String> {
@@ -1008,8 +1226,10 @@ mod tests {
         save_nib_config_full(dir.path(), &mut config).expect("save config");
 
         assert!(run_doctor(dir.path()));
-        assert!(dir.path().join(".nib/profiles/default/sessions").is_dir());
+        let root = dir.path().canonicalize().expect("project");
+        assert!(nib::paths::NibPaths::profile_sessions(&root, "default").is_dir());
         assert!(!dir.path().join(".nib/sessions").exists());
+        assert!(!dir.path().join(".nib/profiles").exists());
         let store = nib::session::SessionStore::for_project(dir.path()).expect("session store");
         let session_ids = store.list_result().expect("doctor audit sessions");
         assert_eq!(session_ids.len(), 1);
@@ -1036,13 +1256,13 @@ mod tests {
     fn doctor_reports_missing_owned_session_worktree_without_repairing_it() {
         let dir = tempdir().expect("tempdir");
         initialize_git(dir.path());
-        let receipts = dir.path().join(".nib/worktree-ownership");
+        let receipts = nib::paths::NibPaths::project_state(dir.path()).join("worktree-ownership");
         std::fs::create_dir_all(&receipts).expect("receipt directory");
         let receipt = json!({
             "kind": "session",
             "phase": "owned",
             "logical_id": "stale-session",
-            "worktree_path": dir.path().join(".nib/worktrees/sessions/stale-session"),
+            "worktree_path": nib::paths::NibPaths::project_state(dir.path()).join("worktrees/sessions/stale-session"),
             "worktree_identity": {"device": 1, "inode": 1},
         });
         let path = receipts.join("stale.json");
@@ -1147,30 +1367,52 @@ mod tests {
         assert!(!run_doctor(dir.path()));
     }
 
-    #[test]
-    fn doctor_rejects_unreadable_session_listing() {
+    /// A project with one session in the session database, and a raw
+    /// connection to that database with the session's scope.
+    fn project_with_database_session(
+        id: &str,
+    ) -> (tempfile::TempDir, rusqlite::Connection, String) {
         let dir = tempdir().expect("tempdir");
         initialize_git(dir.path());
         let mut config = NibConfig::default();
         config.skills.enabled = false;
         save_nib_config_full(dir.path(), &mut config).expect("save config");
-        let sessions = dir.path().join(".nib/profiles/default/sessions");
-        std::fs::create_dir_all(&sessions).expect("sessions dir");
-        std::fs::write(sessions.join("invalid session id.json"), "{}").expect("invalid session");
+        let store = nib::session::SessionStore::for_project(dir.path()).expect("session store");
+        store.create_session_with_id(id);
+        let (key, profile) = nib::paths::NibPaths::database_session_scope(store.sessions_dir())
+            .expect("database session scope");
+        let connection =
+            rusqlite::Connection::open(nib::paths::NibPaths::session_database().expect("nib.db"))
+                .expect("session database");
+        (
+            dir,
+            connection,
+            format!("projects/{key}/profiles/{profile}/sessions"),
+        )
+    }
+
+    #[test]
+    fn doctor_rejects_unreadable_session_listing() {
+        let (dir, connection, scope) = project_with_database_session("listed-session");
+        connection
+            .execute(
+                "UPDATE sessions SET id = 'invalid session id' WHERE scope = ?1",
+                [&scope],
+            )
+            .expect("invalid session id");
 
         assert!(!run_doctor(dir.path()));
     }
 
     #[test]
     fn doctor_rejects_valid_named_corrupt_session() {
-        let dir = tempdir().expect("tempdir");
-        initialize_git(dir.path());
-        let mut config = NibConfig::default();
-        config.skills.enabled = false;
-        save_nib_config_full(dir.path(), &mut config).expect("save config");
-        let sessions = dir.path().join(".nib/profiles/default/sessions");
-        std::fs::create_dir_all(&sessions).expect("sessions dir");
-        std::fs::write(sessions.join("corrupt-session.json"), "not json").expect("corrupt session");
+        let (dir, connection, scope) = project_with_database_session("corrupt-session");
+        connection
+            .execute(
+                "UPDATE sessions SET document = 'not json' WHERE scope = ?1",
+                [&scope],
+            )
+            .expect("corrupt session");
 
         assert!(!run_doctor(dir.path()));
     }
@@ -1309,11 +1551,31 @@ mod tests {
         assert_eq!(entry.api_key.as_deref(), Some("doctor-fix-secret"));
         assert_eq!(entry.api_keys, ["rotating-doctor-fix-secret".to_string()]);
         assert_eq!(entry.reasoning_effort, Some(ReasoningEffort::Medium));
-        assert_eq!(repaired.revision, before_revision + 1);
+        // The transport lives in the user's settings for the project, so the
+        // project's preferences, and their revision, are untouched (T082).
+        assert_eq!(repaired.revision, before_revision);
+        let project_file =
+            std::fs::read_to_string(config_paths(dir.path()).toml).expect("project preferences");
+        assert!(
+            !project_file.contains("doctor-fix-secret"),
+            "{project_file}"
+        );
+        assert!(!project_file.contains("base_url"), "{project_file}");
+        let settings = load_project_settings(dir.path()).expect("project settings");
+        assert_eq!(
+            settings.llm.providers["openai"].api,
+            Some(LlmApiMode::Responses)
+        );
 
+        let settings_path = project_settings_path(dir.path()).expect("settings path");
+        let settings_before = std::fs::read(&settings_path).expect("settings file");
         assert!(!repair_openai_transport(dir.path()).expect("idempotent repair"));
         let unchanged = nib::config::load_nib_config_full(dir.path()).expect("unchanged config");
         assert_eq!(unchanged.revision, repaired.revision);
+        assert_eq!(
+            std::fs::read(&settings_path).expect("settings file"),
+            settings_before
+        );
     }
 
     #[test]

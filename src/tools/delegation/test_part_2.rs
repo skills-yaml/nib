@@ -250,7 +250,8 @@ fn live_owner_is_not_reconciled_through_replaced_lease_paths() {
     write_subagent_record(root.path(), &record).expect("running record");
 
     let visible_directory = owner_lease_directory(root.path());
-    let displaced_directory = root.path().join(".nib/subagent-owner-leases.displaced");
+    let displaced_directory =
+        crate::paths::NibPaths::project_state(root.path()).join("subagent-owner-leases.displaced");
     std::fs::rename(&visible_directory, &displaced_directory)
         .expect("displace live lease directory");
     std::fs::create_dir(&visible_directory).expect("replacement lease directory");
@@ -787,7 +788,8 @@ fn subagent_record_write_never_redirects_to_replaced_records_directory() {
     }
 
     let records = records_dir(root.path());
-    let displaced = root.path().join(".nib/subagents.displaced-write");
+    let displaced =
+        crate::paths::NibPaths::project_state(root.path()).join("subagents.displaced-write");
     std::fs::rename(&records, &displaced).expect("detach records directory");
     std::fs::create_dir(&records).expect("replacement records directory");
     std::fs::write(records.join("replacement-record.json"), &initial)
@@ -1343,7 +1345,6 @@ fn stale_record_revision_cannot_overwrite_a_newer_generation() {
 }
 
 #[test]
-#[expect(clippy::too_many_lines, reason = "legacy function recorded by T044")]
 fn records_namespace_requires_native_origin_or_explicit_offline_attestation() {
     let existing = tempfile::tempdir().expect("existing root");
     let existing_records = records_dir(existing.path());
@@ -1391,9 +1392,7 @@ fn records_namespace_requires_native_origin_or_explicit_offline_attestation() {
     );
 
     let interrupted = tempfile::tempdir().expect("interrupted native root");
-    let staging = interrupted
-        .path()
-        .join(".nib")
+    let staging = crate::paths::NibPaths::project_state(interrupted.path())
         .join(NATIVE_RECORDS_STAGING_DIRECTORY);
     std::fs::create_dir_all(&staging).expect("interrupted native staging");
     std::fs::write(staging.join("interrupted.sentinel"), b"incomplete")
@@ -1415,8 +1414,8 @@ fn records_namespace_requires_native_origin_or_explicit_offline_attestation() {
     assert!(!records_dir(interrupted.path()).exists());
 
     let resumable = tempfile::tempdir().expect("resumable native root");
-    let nib = resumable.path().join(".nib");
-    std::fs::create_dir(&nib).expect("resumable nib directory");
+    let nib = crate::paths::NibPaths::project_state(resumable.path());
+    std::fs::create_dir_all(&nib).expect("resumable nib directory");
     let nib_directory =
         crate::daemons::state::StableDirectory::open(&nib).expect("resumable nib capability");
     let resumable_staging = nib.join(NATIVE_RECORDS_STAGING_DIRECTORY);
@@ -1439,9 +1438,7 @@ fn records_namespace_requires_native_origin_or_explicit_offline_attestation() {
         .expect("resumed native publication authorizes ordinary use");
 
     let mismatch = tempfile::tempdir().expect("mismatched native root");
-    let mismatch_staging = mismatch
-        .path()
-        .join(".nib")
+    let mismatch_staging = crate::paths::NibPaths::project_state(mismatch.path())
         .join(NATIVE_RECORDS_STAGING_DIRECTORY);
     std::fs::create_dir_all(&mismatch_staging).expect("mismatched native staging");
     std::fs::write(
@@ -1536,7 +1533,8 @@ fn global_subagent_legacy_lock_migration_is_bounded_and_fails_closed_for_live_ow
         assert!(!visible.exists());
         assert!(!anchor.exists());
     }
-    let fixed_visible = std::fs::read_dir(root.path().join(".nib"))
+    let state = crate::paths::NibPaths::project_state(root.path());
+    let fixed_visible = std::fs::read_dir(&state)
         .expect("fixed lock directory")
         .filter_map(Result::ok)
         .filter(|entry| {
@@ -1546,13 +1544,21 @@ fn global_subagent_legacy_lock_migration_is_bounded_and_fails_closed_for_live_ow
                 .starts_with(".subagent-record-stripe-")
         })
         .count();
-    let fixed_anchors = std::fs::read_dir(root.path())
+    // The anchors of locks in the state directory sit beside it, named
+    // after it; other projects' state directories share that parent.
+    let state_name = state
+        .file_name()
+        .expect("state name")
+        .to_string_lossy()
+        .into_owned();
+    let fixed_anchors = std::fs::read_dir(state.parent().expect("state parent"))
         .expect("fixed anchor directory")
         .filter_map(Result::ok)
         .filter(|entry| {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            name.contains("subagent-record-stripe-") && name.ends_with(".anchor")
+            name.contains(&format!("-{state_name}-.subagent-record-stripe-"))
+                && name.ends_with(".anchor")
         })
         .count();
     assert!(fixed_visible <= SUBAGENT_RECORD_LOCK_STRIPES);

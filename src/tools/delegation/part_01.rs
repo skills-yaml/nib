@@ -12,9 +12,11 @@ pub(crate) fn open_owner_lease_directories(
     ),
     String,
 > {
-    let nib = project_root.join(".nib");
+    let nib = crate::paths::NibPaths::project_state(project_root);
     let visible = owner_lease_directory(project_root);
     if create {
+        crate::state_migration::ensure_state_directory(&nib)
+            .map_err(|error| format!("subagent owner lease directory is unsafe: {error}"))?;
         crate::fs_security::ensure_directory_without_symlinks(&visible)
             .map_err(|error| format!("subagent owner lease directory is unsafe: {error}"))?;
     } else {
@@ -26,9 +28,8 @@ pub(crate) fn open_owner_lease_directories(
     let canonical = visible
         .canonicalize()
         .map_err(|error| format!("failed to resolve subagent owner lease directory: {error}"))?;
-    let within_project =
-        crate::fs_security::canonical_path_starts_with(&canonical, project_root)
-            .map_err(|error| format!("failed to resolve subagent project root: {error}"))?;
+    let within_project = crate::fs_security::canonical_path_starts_with(&canonical, &nib)
+        .map_err(|error| format!("failed to resolve subagent project state: {error}"))?;
     if crate::fs_security::metadata_is_link_or_reparse(&metadata)
         || !metadata.is_dir()
         || !within_project
@@ -61,9 +62,11 @@ pub(crate) fn owner_lease_anchor_path(
     if parsed.to_string() != lease_id {
         return Err("subagent owner lease identifier is not canonical".to_string());
     }
-    Ok(project_root.join(".nib").join(format!(
-        "{OWNER_LEASE_ANCHOR_PREFIX}{lease_id}{OWNER_LEASE_ANCHOR_SUFFIX}"
-    )))
+    Ok(
+        crate::paths::NibPaths::project_state(project_root).join(format!(
+            "{OWNER_LEASE_ANCHOR_PREFIX}{lease_id}{OWNER_LEASE_ANCHOR_SUFFIX}"
+        )),
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -160,7 +163,11 @@ impl RepositoryMergeLock {
                 anchor_path.display()
             )
         })?;
-        let project_directory = crate::daemons::state::StableDirectory::open(project_root)?;
+        let state_parent = crate::state_migration::ensure_state_parent(
+            &crate::paths::NibPaths::project_state(project_root),
+        )
+        .map_err(|error| format!("repository merge lock directory is unsafe: {error}"))?;
+        let project_directory = crate::daemons::state::StableDirectory::open(&state_parent)?;
         let mut setup_guard = || {
             ensure_repository_merge_lock_not_cancelled(cancellation)?;
             if Instant::now() >= deadline {
@@ -443,9 +450,17 @@ pub(crate) fn with_delegation_lock_in_deadline_with_setup_hook<T>(
 }
 
 pub(crate) fn delegation_lock_project_root(lock_path: &Path) -> Result<PathBuf, String> {
+    // Project state in nib's user home is opened from the user home, which
+    // also holds the lock anchors of its project directories.
+    if let Some(home) = crate::state_migration::user_home_containing(lock_path) {
+        return Ok(home);
+    }
     let mut current = lock_path.parent();
     while let Some(directory) = current {
-        if directory.file_name() == Some(std::ffi::OsStr::new(".nib")) {
+        if directory
+            .file_name()
+            .is_some_and(crate::paths::NibPaths::is_project_dir_name)
+        {
             return directory.parent().map(Path::to_path_buf).ok_or_else(|| {
                 format!(
                     "delegation state directory has no project root: {}",
@@ -531,9 +546,7 @@ pub(crate) fn repository_merge_lock_timeout(path: &Path, timeout: Duration) -> S
 }
 
 pub(crate) fn repository_merge_lock_anchor_path(project_root: &Path) -> PathBuf {
-    project_root
-        .join(".nib")
-        .join(".subagents.merge.lock.anchor")
+    crate::paths::NibPaths::project_state(project_root).join(".subagents.merge.lock.anchor")
 }
 
 #[cfg(all(test, any(unix, windows)))]

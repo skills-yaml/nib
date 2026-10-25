@@ -482,6 +482,17 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
     assert!(script.contains("Resumed session $target_session from persisted state."));
     assert!(script.contains("for session_file in \"$session_directory\"/*.json; do"));
     assert!(script.contains("grep -Fq \"$private_sentinel\" \"$session_file\""));
+    // T082: the smoke keeps nib's user home inside its fixture and reads the
+    // persisted sessions and the user's project settings where nib now keeps
+    // them, never the project's legacy `.nib` layout.
+    assert!(script.contains("nib_home=\"$fixture/nib-home\""));
+    assert!(script.contains("\"NIB_HOME=$nib_home\""));
+    assert!(script.contains("NIB_HOME=$quoted_nib_home"));
+    assert!(script.contains("export_sessions"));
+    assert!(script.contains("grep -Fq 'allowed = true' \"$(project_settings_file)\""));
+    assert!(script.contains("if grep -Fq 'allowed' \"$fixture/.nib/config.toml\"; then"));
+    assert!(!script.contains(".nib/profiles/default/sessions"));
+    assert!(!script.contains("grep -Fq 'allowed = true' \"$fixture/.nib/config.toml\""));
     assert!(!script.contains("mapfile"));
     assert!(!script.contains("-maxdepth"));
     assert!(!script.contains("realpath"));
@@ -608,6 +619,33 @@ fn interactive_release_smoke_is_offline_bounded_and_restoration_aware() {
     assert!(windows_script.contains(
         "foreach ($fullScreenSequence in @(\n        \"$([char]27)[?1049\",\n        \"$([char]27)[?2004\"\n    )) {\n        if ($plainResult.Output.Contains($fullScreenSequence)) {"
     ));
+    // T082: the Windows smoke keeps nib's user home inside its fixture too,
+    // finds the user's project settings by the root project.toml records,
+    // and reads sessions through a read-only export of the session database.
+    for contract in [
+        "$nibHome = Join-Path $fixture \"nib-home\"",
+        "$env:NIB_HOME = $nibHome",
+        "\"NIB_HOME\",",
+        "Find-NibSmokePython",
+        "-I $script:sessionExportPath",
+        "?mode=ro",
+        "WHERE profile_id = 'default'",
+        "Export-NibSmokeSessions",
+        "Start-NibSmokeSessionExporter",
+        "Stop-NibSmokeSessionExporter",
+        "Join-Path $_.FullName \"project.toml\"",
+        "Get-Content -LiteralPath (Get-NibSmokeProjectSettingsFile) -Raw",
+        "if ($projectConfig.Contains(\"allowed\")) {",
+        "Get-ChildItem -LiteralPath $nibHome -Filter \"nib.db*\" -File",
+        "Test-NibSmokeFileContainsSentinel",
+    ] {
+        assert!(
+            windows_script.contains(contract),
+            "missing Windows interactive smoke contract: {contract}"
+        );
+    }
+    assert!(!windows_script.contains(".nib\\profiles\\default\\sessions"));
+    assert!(!windows_script.contains("$persistedConfig"));
     assert!(!windows_script.contains("Invoke-WebRequest"));
     assert!(!windows_script.contains("curl"));
     assert!(windows_script.contains("-AllowInterruptedChildWithoutExitMarker"));

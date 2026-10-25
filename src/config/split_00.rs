@@ -488,7 +488,7 @@ impl Default for SkillsConfig {
 }
 
 pub(crate) fn default_skill_paths() -> Vec<PathBuf> {
-    vec![PathBuf::from(".nib/skills")]
+    vec![crate::paths::NibPaths::relative_project_skills()]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -540,9 +540,11 @@ pub fn workspace_access_is_granted(project_root: &Path) -> Result<bool, ConfigEr
     Ok(load_nib_config_full(project_root)?.workspace.allowed)
 }
 
+/// Records the user's grant to work in this project in the user's settings
+/// for it, never in the project, which could grant itself access.
 pub fn grant_workspace_access(project_root: &Path) -> Result<(), ConfigError> {
-    update_nib_config(project_root, |config| {
-        config.workspace.allowed = true;
+    update_project_settings(project_root, |settings| {
+        settings.workspace.allowed = Some(true);
         Ok(())
     })
 }
@@ -1378,6 +1380,20 @@ impl NibConfig {
         }
     }
 
+    /// Validates a project's preferences on their own. They may select a
+    /// provider that only the user configuration defines, so that reference
+    /// is checked on the effective configuration instead.
+    pub(crate) fn validate_preferences(&self) -> Result<(), ConfigValidationError> {
+        match &self.llm.active_provider {
+            Some(provider) if !self.llm.providers.contains_key(provider) => {
+                let mut preferences = self.clone();
+                preferences.llm.active_provider = None;
+                preferences.validate()
+            }
+            _ => self.validate(),
+        }
+    }
+
     pub fn sensitive_values(&self) -> Vec<String> {
         let mut values = HashSet::new();
         for provider in self.llm.providers.values() {
@@ -1732,7 +1748,7 @@ impl LlmConfig {
 }
 
 pub fn config_paths(project_root: &Path) -> ConfigPaths {
-    let nib_dir = project_root.join(".nib");
+    let nib_dir = crate::paths::NibPaths::project_prefs(project_root);
     ConfigPaths {
         toml: nib_dir.join("config.toml"),
         json: nib_dir.join("config.json"),
@@ -1765,9 +1781,13 @@ pub(crate) fn load_nib_config_full_until(
     project_root: &Path,
     deadline: Instant,
 ) -> Result<NibConfig, ConfigError> {
-    with_config_lock_until(project_root, deadline, |paths, directory| {
-        load_nib_config_with_source_unlocked(paths, directory).map(|loaded| loaded.config)
-    })
+    let (document, revision) =
+        with_config_lock_until(project_root, deadline, |paths, directory| {
+            load_nib_config_with_source_unlocked(paths, directory)
+                .map(|loaded| (loaded.document, loaded.config.revision))
+        })?;
+    ensure_config_lock_deadline(Some(deadline))?;
+    UserLayers::load(project_root)?.effective(&document, revision)
 }
 
 /// Reads a configuration snapshot without creating, migrating, backing up, or
@@ -1783,7 +1803,7 @@ pub(crate) fn load_nib_config_full_read_only_until(
     let directory =
         crate::daemons::state::StableDirectory::open(&paths.nib_dir).map_err(config_state_error)?;
     ensure_config_lock_deadline(Some(deadline))?;
-    let config = if let Some(file) = directory
+    let (config, document) = if let Some(file) = directory
         .open_atomic_file_read_only_until(&paths.toml, CONFIG_ATOMIC_TEMPORARY_PREFIX, deadline)
         .map_err(config_state_error)?
     {
@@ -1791,16 +1811,21 @@ pub(crate) fn load_nib_config_full_read_only_until(
     } else if regular_file_exists(&directory, &paths.json)? {
         let (content, _) = read_regular_file(&directory, &paths.json)?;
         let llm: LlmConfig = serde_json::from_str(&content)?;
-        NibConfig {
+        let config = NibConfig {
             revision: 1,
             llm,
             ..NibConfig::default()
-        }
+        };
+        let mut document = toml::Value::try_from(&config)?;
+        let user_only = split_user_only(&mut document)?;
+        require_migrated(&paths.toml, &user_only)?;
+        (config, document)
     } else {
-        NibConfig::default()
+        (NibConfig::default(), toml::Value::Table(toml::Table::new()))
     };
     ensure_config_lock_deadline(Some(deadline))?;
-    config.validate()?;
+    let config = UserLayers::load(project_root)?.effective(&document, config.revision)?;
+    ensure_config_lock_deadline(Some(deadline))?;
     Ok(config)
 }
 
@@ -1816,8 +1841,8 @@ pub(crate) fn load_nib_config_full_preflight_read_only_until(
     match std::fs::symlink_metadata(&paths.nib_dir) {
         Ok(_) => load_nib_config_full_read_only_until(project_root, deadline),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let config = NibConfig::default();
-            config.validate()?;
+            let empty = toml::Value::Table(toml::Table::new());
+            let config = UserLayers::load(project_root)?.effective(&empty, 0)?;
             ensure_config_lock_deadline(Some(deadline))?;
             match std::fs::symlink_metadata(&paths.nib_dir) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(config),
@@ -1831,38 +1856,67 @@ pub(crate) fn load_nib_config_full_preflight_read_only_until(
     }
 }
 
+/// Loads a project's effective configuration: the user configuration, the
+/// project's preferences over it, then the user's settings for the project.
 pub fn load_nib_config_full_with_source(
     project_root: &Path,
 ) -> Result<(NibConfig, ConfigSource), ConfigError> {
-    with_config_lock(project_root, |paths, directory| {
+    let (document, revision, source) = with_config_lock(project_root, |paths, directory| {
         load_nib_config_with_source_unlocked(paths, directory)
-            .map(|loaded| (loaded.config, loaded.source))
-    })
+            .map(|loaded| (loaded.document, loaded.config.revision, loaded.source))
+    })?;
+    let config = UserLayers::load(project_root)?.effective(&document, revision)?;
+    Ok((config, source))
 }
 
 pub fn load_config_with_source(
     project_root: &Path,
 ) -> Result<(LlmConfig, ConfigSource), ConfigError> {
-    with_config_lock(project_root, |paths, directory| {
-        load_nib_config_with_source_unlocked(paths, directory)
-            .map(|loaded| (loaded.config.llm, loaded.source))
-    })
+    load_nib_config_full_with_source(project_root).map(|(config, source)| (config.llm, source))
 }
 
+/// Saves a project's LLM configuration: its credentials, endpoints and
+/// transports go to the user's settings for the project, and the rest to
+/// the project's preferences.
 pub fn save_config(project_root: &Path, llm: &LlmConfig) -> Result<(), ConfigError> {
-    let llm = llm.clone();
+    let whole = NibConfig {
+        llm: llm.clone(),
+        ..NibConfig::default()
+    };
+    whole.validate_preferences()?;
+    let mut document = toml::Value::try_from(&whole)?;
+    let user_only = split_user_only(&mut document)?;
+    store_user_only_values(
+        project_root,
+        &user_only.settings,
+        llm.providers.keys(),
+        false,
+    )?;
+    let preferences: NibConfig = document.try_into()?;
     update_nib_config(project_root, move |config| {
-        config.llm = llm;
+        config.llm = preferences.llm;
         Ok(())
     })
 }
 
+/// Saves a whole configuration for a project. User-only values replace the
+/// user's settings for the project (for the providers `cfg` names); the
+/// rest replaces the project's preferences, at `cfg.revision`.
 pub fn save_nib_config_full(project_root: &Path, cfg: &mut NibConfig) -> Result<(), ConfigError> {
     cfg.validate()?;
     let committed_revision = cfg
         .revision
         .checked_add(1)
         .ok_or_else(|| ConfigError::Operation("configuration revision overflowed".to_string()))?;
+    let mut document = toml::Value::try_from(&*cfg)?;
+    let user_only = split_user_only(&mut document)?;
+    let mut preferences: NibConfig = document.try_into()?;
+    store_user_only_values(
+        project_root,
+        &user_only.settings,
+        cfg.llm.providers.keys(),
+        true,
+    )?;
     with_config_lock(project_root, |paths, directory| {
         // A direct save must not turn an unreadable on-disk configuration into
         // an apparently successful default or replacement.
@@ -1873,12 +1927,58 @@ pub fn save_nib_config_full(project_root: &Path, cfg: &mut NibConfig) -> Result<
                 cfg.revision, loaded.config.revision
             )));
         }
-        let mut next = cfg.clone();
-        next.revision = committed_revision;
-        save_nib_config_atomic(directory, &paths.toml, &next, loaded.expectation())
+        preferences.revision = committed_revision;
+        let document = preferences_document(&paths.toml, &preferences, None)?;
+        save_document_atomic_with_hook(
+            directory,
+            &paths.toml,
+            &document,
+            loaded.expectation(),
+            || Ok(()),
+        )
     })?;
     cfg.revision = committed_revision;
     Ok(())
+}
+
+/// Replaces the user-only values of a project's user settings for the
+/// given providers (and, when `scalars`, its approvals, sandbox and trust)
+/// with `values`. Nothing is written when there is nothing to store or
+/// replace.
+fn store_user_only_values<'a>(
+    project_root: &Path,
+    values: &ProjectSettings,
+    providers: impl Iterator<Item = &'a String>,
+    scalars: bool,
+) -> Result<(), ConfigError> {
+    let providers: Vec<String> = providers.cloned().collect();
+    let current = load_project_settings(project_root)?;
+    let mut next = current.clone();
+    for name in &providers {
+        match values.llm.providers.get(name) {
+            Some(provider) => {
+                next.llm.providers.insert(name.clone(), provider.clone());
+            }
+            None => {
+                next.llm.providers.remove(name);
+            }
+        }
+    }
+    if scalars {
+        next.approvals = values.approvals.clone();
+        next.execution = values.execution.clone();
+        next.workspace = values.workspace.clone();
+    }
+    if next == current {
+        return Ok(());
+    }
+    update_project_settings(project_root, move |settings| {
+        *settings = ProjectSettings {
+            migration: settings.migration.clone(),
+            ..next
+        };
+        Ok(())
+    })
 }
 
 /// Bootstraps configuration in a newly created, caller-exclusive worktree.
@@ -1910,14 +2010,24 @@ pub(crate) fn save_nib_config_full_new_unpublished_root(
     }
     let mut next = cfg.clone();
     next.revision = 1;
-    save_nib_config_atomic(
+    save_document_atomic_with_hook(
         &directory,
         &paths.toml,
-        &next,
+        &child_preferences_document(&next)?,
         crate::daemons::state::FileExpectation::Missing,
+        || Ok(()),
     )?;
     cfg.revision = 1;
     Ok(())
+}
+
+/// A child worktree's preferences: the parent's effective configuration
+/// without its user-only values, which the child reads from the same user
+/// settings (a linked worktree shares its project's key).
+pub(crate) fn child_preferences_document(config: &NibConfig) -> Result<toml::Value, ConfigError> {
+    let mut document = minimal_document(config, None)?;
+    split_user_only(&mut document)?;
+    Ok(document)
 }
 
 /// Bootstraps configuration in a caller-exclusive worktree while an external
@@ -1958,7 +2068,7 @@ pub(crate) fn save_nib_config_full_new_unpublished_root_with_guard(
     let mut next = cfg.clone();
     next.revision = 1;
     next.validate()?;
-    let content = toml::to_string_pretty(&next)?;
+    let content = toml::to_string_pretty(&child_preferences_document(&next)?)?;
     if content.len() as u64 > MAX_CONFIG_FILE_BYTES {
         return Err(ConfigError::FileTooLarge {
             path: paths.toml.display().to_string(),
@@ -2016,8 +2126,16 @@ pub fn update_nib_config_conditionally<T>(
         loaded.config.revision = revision.checked_add(1).ok_or_else(|| {
             ConfigError::Operation("configuration revision overflowed".to_string())
         })?;
-        loaded.config.validate()?;
-        save_nib_config_atomic(directory, &paths.toml, &loaded.config, loaded.expectation())?;
+        let document = preferences_document(&paths.toml, &loaded.config, Some(&loaded.document))?;
+        // The edit must also leave a valid effective configuration.
+        UserLayers::load(project_root)?.effective(&document, loaded.config.revision)?;
+        save_document_atomic_with_hook(
+            directory,
+            &paths.toml,
+            &document,
+            loaded.expectation(),
+            || Ok(()),
+        )?;
         Ok(output)
     })
 }
@@ -2028,16 +2146,17 @@ pub fn edit_nib_config<T>(
 ) -> Result<T, ConfigError> {
     with_config_lock(project_root, |paths, directory| {
         let loaded = load_nib_config_with_source_unlocked(paths, directory)?;
-        let original = loaded.config;
-        let committed_revision = original.revision.checked_add(1).ok_or_else(|| {
+        let original = loaded.document;
+        let committed_revision = loaded.config.revision.checked_add(1).ok_or_else(|| {
             ConfigError::Operation("configuration revision overflowed".to_string())
         })?;
         if !regular_file_exists(directory, &paths.toml)? {
-            save_nib_config_atomic(
+            save_document_atomic_with_hook(
                 directory,
                 &paths.toml,
                 &original,
                 crate::daemons::state::FileExpectation::Missing,
+                || Ok(()),
             )?;
         }
 
@@ -2053,14 +2172,22 @@ pub fn edit_nib_config<T>(
         };
         directory.verify_visible().map_err(config_state_error)?;
 
-        match load_nib_config_file(directory, &paths.toml) {
-            Ok((mut config, edited_file)) => {
+        let checked = load_nib_config_file(directory, &paths.toml).and_then(
+            |(mut config, edited_file, document)| {
                 config.revision = committed_revision;
-                save_nib_config_atomic(
+                let document = preferences_document(&paths.toml, &config, Some(&document))?;
+                UserLayers::load(project_root)?.effective(&document, committed_revision)?;
+                Ok((document, edited_file))
+            },
+        );
+        match checked {
+            Ok((document, edited_file)) => {
+                save_document_atomic_with_hook(
                     directory,
                     &paths.toml,
-                    &config,
+                    &document,
                     crate::daemons::state::FileExpectation::Present(&edited_file),
+                    || Ok(()),
                 )?;
                 Ok(edited)
             }

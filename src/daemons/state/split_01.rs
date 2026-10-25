@@ -1179,7 +1179,7 @@ pub(crate) fn daemon_lock_anchor_path(lock_path: &Path) -> Result<PathBuf, Strin
             visible_directory.display()
         )
     })?;
-    let anchor_directory = if visible_directory_name == ".nib" {
+    let anchor_directory = if crate::paths::NibPaths::is_project_dir_name(visible_directory_name) {
         git_lock_anchor_directory(fallback_anchor_directory)
     } else {
         None

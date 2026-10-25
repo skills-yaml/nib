@@ -69,20 +69,137 @@ but is explicitly ineligible as proof of a published exact-revision artifact.
 ## Project Setup
 
 Run `nib` from the configured profile root, normally the Git top-level directory.
-Running from a nested directory can select a different config root. Default runtime
-state is project-local:
+Running from a nested directory can select a different config root. nib keeps
+configuration only you may set, a project's runtime state and its sessions in its
+user home; the project's own `.nib` holds only its preferences:
 
-- `.nib/config.toml`: provider and runtime configuration.
-- `.nib/profiles/default/sessions/*.json`: messages, plans, approvals, tool calls,
-  and audit records.
-- `.nib/profiles/default/memory.json`: durable environment and user memory.
-- `.nib/profiles/default/daemons/`: cron state, pins, and maintenance audit.
+- `~/.nib/config.toml`: your user configuration for every project: provider
+  credentials, endpoints and transports, default provider and model, and your
+  permission rules. `nib auth` writes it. Set `NIB_HOME` to use a folder other than
+  `~/.nib`; nib passes it on to the commands and MCP servers it starts, so a nib
+  they run uses the same folder.
+- `~/.nib/projects/<project-key>/config.toml`: your settings for one project:
+  approvals preset, sandbox level, the startup directory grant, and any
+  credentials or endpoints moved there from the project's old configuration. The
+  key is the project folder's name plus a hash of its full path; session and
+  subagent worktrees use their project's key.
+- `~/.nib/nib.db`: the sessions of every project (messages, plans, approvals, tool
+  calls and audit records) in one SQLite database, owner-only. nib bundles SQLite;
+  nothing needs to be installed. Each session is one row, with its messages and
+  events as rows of their own; a write that would overwrite a newer version of a
+  session is rejected.
+- `~/.nib/projects/<project-key>/`: the project's runtime state:
+  - `profiles/default/sessions/`: the locks and run leases of the project's sessions,
+    and beside it `checkpoints/`, `file_reads/` and `presence/`, each session's
+    checkpoints, read records and running-session heartbeats;
+  - `profiles/default/memory.json`: durable environment and user memory;
+  - `profiles/default/daemons/`: cron state, pins, and maintenance audit;
+  - `profiles/default/managed-skills/` and `context.json`: curated skills and
+    context;
+  - `subagents/`, `subagent-owner-leases/` and `process-scopes/`: delegation
+    records and the processes nib supervises;
+  - `worktree-ownership/`: receipts of the worktrees nib manages;
+  - `plans/` and `command-prefixes.json`: written plans and remembered command
+    prefixes;
+  - `worktrees/sessions/` and `worktrees/subagents/`: Git worktrees for sessions that
+    use one, and for subagents. A worktree keeps its own state inside itself.
+
+  A Git worktree you create yourself (`git worktree add`) is its own working folder
+  and gets its own state directory; its settings are its main project's.
+- `.nib/config.toml`: the project's preferences: provider and model selection,
+  skills, and agent and runtime behavior. It cannot hold secrets or safety settings.
 - `.nib/skills/`: project-local skills.
-- `.nib/worktrees/sessions/` and `.nib/worktrees/subagents/`: Git worktrees for
-  sessions that use one, and for subagents.
-- `.nib/subagents/`: linked delegation records.
 
-Configured profiles replace `default` with their profile ID or custom `state_dir`.
+Configured profiles replace `default` with their profile ID. A profile with a custom
+`state_dir` keeps all its state in that folder, its sessions as JSON files in its
+`sessions/` (as do the worktrees nib manages, which keep their state inside
+themselves).
+
+`nib doctor` prints these locations under "Checking nib layout".
+
+#### Runtime state from older versions
+
+Older versions kept the runtime state and the sessions in the project's `.nib`.
+When this version loads a project that still has them, nib moves the state to
+`~/.nib/projects/<project-key>/` and the sessions into `~/.nib/nib.db`:
+
+- each file and folder is renamed, never copied, so nothing is rewritten and
+  nothing is lost; where both places already hold the same file, the project's
+  copy is kept in `<project>/.nib/legacy-<time>/state/`;
+- if your user home already holds a different version of an entry, nothing is
+  moved and nib stops with a message naming both paths;
+- while the old state is in use (a running nib session, running subagents or
+  supervised processes), it stays in the project and nib keeps using it there;
+  the next start after they finish moves it;
+- if your user home is on another file system than the project, the state stays in
+  the project and nib says so;
+- the move is recorded in `~/.nib/projects/<project-key>/state.toml` before each
+  step, and an interrupted move finishes on the next start;
+- each session file (`.nib/profiles/<id>/sessions/<session-id>.json`) is imported
+  with its full content; nib checks every file before it changes anything, and a
+  session the database already holds differently stops the migration with a message
+  naming the file. Once every session of a profile is in the database, the whole
+  original `sessions/` folder (session files, locks, and any file nib could not read
+  as a session, which it names in a warning) is kept byte for byte in
+  `<project>/.nib/legacy-<time>/sessions/`. The import is recorded per session, so
+  an interrupted import resumes without duplicates, and running it again changes
+  nothing. A session that is running (its run lease is held) postpones the move.
+  If a nib that was already running saves a session after its import, nib keeps
+  that save in the legacy copy and reports the file. A session folder with more
+  than 100,000 entries is not imported; nib stops with a message instead;
+- sessions from before profiles (`.nib/sessions/`) are imported into the default
+  profile the same way, and the folder is then kept in
+  `<project>/.nib/legacy-<time>/sessions/sessions/`;
+- worktrees older versions created under `.nib/worktrees/` stay where they are and
+  remain manageable (`/land`, subagent cleanup, `nib doctor`); new ones go to the
+  user home;
+- nib leaves a marker in `.nib/profiles/<id>/` that older versions refuse to start
+  with, so they cannot begin a second copy of the state in the project. State an
+  older version writes there anyway is left in place and reported, never merged
+  over the moved state.
+
+nib reports what it moved in its log only; the TUI shows no notice. `nib doctor`
+lists what is left of older versions in `.nib`: runtime state that could not move
+yet, the `legacy-<time>` folders with the originals, the older worktrees, and each
+session file that is in a legacy copy but not in `~/.nib/nib.db` ("Not
+imported": a file nib could not read, or one saved after its import). Remove a
+`legacy-<time>` folder once you no longer need it.
+
+To go back to an older nib, stop every nib process of the project, then:
+
+1. Delete the "state moved" markers `.nib/profiles/<id>/.legacy-state-migration-v1.json`
+   (they hold `"version": 2`); older versions refuse to load a profile while
+   they are there.
+2. Move each entry listed under `moved` in
+   `~/.nib/projects/<project-key>/state.toml` from that folder back to the same
+   path below `<project>/.nib/`. The state was moved, not copied, so the legacy
+   copies do not hold it.
+3. Move `<project>/.nib/legacy-<time>/sessions/profiles/<id>/sessions/` back to
+   `.nib/profiles/<id>/sessions/`, the `.nib-lock-*.anchor` files next to it back to
+   `.nib/profiles/<id>/`, and `legacy-<time>/sessions/sessions/` (if present) back
+   to `.nib/sessions/`.
+
+Sessions created or changed after the migration exist only in `~/.nib/nib.db`,
+which is kept; an older nib does not see them.
+
+#### Moving or copying a project
+
+nib keys a project's state by its folder. A copied project starts with its own
+empty state and leaves the original's untouched. A moved or renamed project also
+starts fresh, and its earlier state stays under the old key; `nib doctor` reports
+it ("Moved? ... no longer exists") with the command that brings it along:
+
+```bash
+nib doctor --fix --relink /old/path/to/project
+```
+
+Naming the old folder confirms the re-link. nib refuses while the old state is in
+use, and when the old folder still exists (a copy keeps its own state). It moves the
+state folder and its sessions to the new key, keeps any state the new folder already
+had (and its sessions) aside in `~/.nib/projects/.relinked-<key>-<time>/`, keeps
+worktree receipts that name the old folder in the state's `relinked-<time>/`, and
+asks Git to repair the links of the worktrees nib manages. An interrupted re-link
+finishes on the next start or the next `--relink`.
 
 The repository `.gitignore` should exclude `.nib/`; API keys and session data must not
 be committed.
@@ -94,8 +211,12 @@ cd /path/to/project
 nib auth
 ```
 
-The wizard writes the selected provider, model, and API key to `.nib/config.toml`.
-Config writes use owner-only permissions on Unix, but credentials remain plaintext.
+The wizard writes the selected provider, model, and API key to your user
+configuration, `~/.nib/config.toml`, so every project can use them and no project
+folder holds them. The user home is created owner-only (`0700`) and its files are
+written owner-only (`0600`) on Unix, but credentials remain plaintext. A project
+whose preferences still select the placeholder `mock` provider switches to the
+provider you just configured; any other project selection is kept.
 The configured adapters are OpenAI, Anthropic, Google Gemini, xAI Grok, OpenRouter,
 Meta, and the deterministic Mock provider used for tests. Meta has no verified public
 default inference endpoint in this adapter and therefore requires an explicit
@@ -103,6 +224,39 @@ OpenAI-compatible `base_url`; readiness fails before network I/O when it is abse
 Credentials can instead
 come from `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `XAI_API_KEY`,
 `OPENROUTER_API_KEY`, or `META_API_KEY`.
+
+### Configuration layers
+
+nib builds a project's configuration from, in rising precedence:
+
+1. your user configuration, `~/.nib/config.toml`;
+2. the project's preferences, `<project>/.nib/config.toml`, so a project can choose
+   its own provider, model, skills and agent settings over your defaults;
+3. your settings for this project, `~/.nib/projects/<project-key>/config.toml`.
+
+Credentials in the environment keep their precedence where providers read them.
+The project's preferences cannot set `api_key`, `api_keys`, `base_url` or `api`
+for a provider, `[approvals]`, `execution.sandbox` or `[workspace]`: otherwise a
+cloned repository could send your credentials to its own endpoint or relax safety.
+A project file that sets them is rejected with a diagnostic that names the keys;
+remove them, then set credentials with `nib auth` and approvals or trust with
+`/permissions` and the startup grant.
+
+Configuration written by older versions kept these values in the project. The first
+time this version loads such a file, and Git does not track it, nib migrates it:
+
+- the original is kept byte for byte in `<project>/.nib/legacy-<time>/config.toml`;
+- its credentials, endpoints, transports, approvals preset, sandbox level and
+  directory grant move to your settings for the project; an existing different
+  setting is never replaced (the migration then stops with a diagnostic and changes
+  nothing);
+- the project file is rewritten as preferences only, without values that equal the
+  defaults.
+
+The migration is idempotent and safe to interrupt: the next load reuses the kept
+original and finishes. A file that the repository ships (tracked by Git) is never
+migrated: user-only values in it are refused, and default-valued ones are ignored.
+After the migration, user-only values added to the project file again are refused.
 
 ### Configuration
 
@@ -130,12 +284,12 @@ model = "gpt-6.1-sol"
 # Optional replacement for nib's bundled /model suggestions. Model selection is not
 # restricted to this list, and the selected model is always shown in the picker.
 models = ["gpt-6.1-sol", "gpt-6-astra", "my-gateway/model"]
-api_key = "replace-or-use-OPENAI_API_KEY"
-api_keys = []
-api = "responses"              # responses | chat_completions
+api_key = "replace-or-use-OPENAI_API_KEY"  # user configuration only
+api_keys = []                  # user configuration only
+api = "responses"              # responses | chat_completions; user configuration only
 reasoning_effort = "medium"    # optional: none|minimal|low|medium|high|xhigh|max
 prompt_cache = "auto"          # optional: auto (default) | extended | off
-# base_url = "https://api.openai.com/v1"
+# base_url = "https://api.openai.com/v1"   # user configuration only
 
 [agent]
 max_turns = 90
@@ -159,10 +313,10 @@ network = "restricted"    # restricted | enabled | disabled
 allow_write = []
 network = "disabled"
 
-[approvals]
+[approvals]               # user configuration or project settings only
 mode = "manual"           # manual | smart | policy | off
 
-[workspace]
+[workspace]               # user configuration or project settings only
 allowed = false           # set true after the startup directory grant
 
 [compression]
@@ -669,7 +823,7 @@ next-turn queue rule; `/help` remains available for immediate command discovery.
   of a push. Commits never include `.nib` (nib's state) and refuse untracked nested
   repositories. nib commits or pushes only when you ask it to.
 - `/permissions [manual|smart|policy|off]` inspects or sets the configured approval
-  preset, then recomputes the effective provider/profile/network and platform sandbox
+  preset (kept in your settings for the project, not in its `.nib`), then recomputes the effective provider/profile/network and platform sandbox
   posture. The configured preset cannot weaken per-action AGENTS.md, skill, tool-policy,
   plan, managed-worktree, sandbox, or platform limits. Broader/off and fail-closed
   states are labeled in text rather than by color alone. `/permissions` also lists
@@ -922,7 +1076,8 @@ the working directory under it; then `/new` to start a fresh session and worktre
 `/session` to switch sessions, and the most-used keys, plus the prompt. The first interactive start in a project asks permission to work in
 that directory before any goal runs. The composer shows the path and Allow/Decline
 choices sit under the input with Decline focused first. Select Allow and press Enter
-to persist `workspace.allowed`; Enter on the default, or Escape, quits. Later starts
+to persist `workspace.allowed` in your settings for the project (never in the
+project's own files); Enter on the default, or Escape, quits. Later starts
 skip the prompt. A
 slash-command prefix opens bounded completion immediately under the composer from the
 same command registry used by parsing and help. The option list does not cover the
@@ -1230,14 +1385,18 @@ allows it. Set `NIB_HOME` to keep nib's user files somewhere other than `~/.nib`
 `execution.sandbox` (or `nib run --sandbox`) sets how much commands may touch:
 
 - `workspace-write` (default): commands run in the Linux `bwrap` sandbox and can
-  write the workspace; Git metadata stays read-only, and `.nib` and your home
-  folder are hidden.
+  write the workspace; Git metadata stays read-only, and `.nib`, nib's user home
+  (`~/.nib` or `NIB_HOME`, wherever it is) and your home folder are hidden. A
+  worktree nib created in its user home stays visible to the commands working in
+  it.
 - `read-only`: commands can read the project but write only a private `/tmp`,
   without network. File edits, commits and pushes are refused. Without `bwrap`
   (macOS, Windows), only commands classified read-only run.
 - `full-access`: commands run directly on your machine with network. Choose it
   only when you trust the task; the footer shows `FULL ACCESS (no sandbox)`.
-  From a configuration file it applies only in a project you trusted with
+  Set it in `~/.nib/config.toml` or your settings for the project (a project's
+  own `.nib/config.toml` cannot set the sandbox level). From a configuration file
+  it applies only in a project you trusted with
   `/permissions trust`; `nib run --sandbox full-access` applies it for one run.
   Project instructions that restrict execution, `execution.provider = "bwrap"`
   and a disabled network keep the sandbox (`nib run` refuses the flag then).
@@ -1275,7 +1434,7 @@ permissions.
   undo checkpoint keeps them. Files whose worktree was landed or removed are
   listed, not restored.
 - Checkpoints never touch `.git` or `.nib` and are not Git commits. They are
-  stored under `.nib/profiles/<id>/checkpoints/`, which the Linux sandbox hides
+  stored under `~/.nib/projects/<project-key>/profiles/<id>/checkpoints/`, which the Linux sandbox hides
   from tool commands. Commands allowed to run outside the sandbox (macOS,
   Windows, `full-access`) could change them, but a rewind still writes only
   inside the session's workspace.
@@ -1325,7 +1484,7 @@ Windows, `full-access`, or `hybrid` without usable `bwrap`) commands are not
 confined this way.
 
 A session works in its own Git worktree, on a `nib/session/...` branch under
-`.nib/worktrees/sessions/`, when:
+`~/.nib/projects/<project-key>/worktrees/sessions/`, when:
 
 - you run `/worktree` (from the session's next request) or start nib with
   `nib --worktree` or `nib run --worktree`;
@@ -1367,7 +1526,8 @@ partway (for example on files nib may not delete), or nib cannot load the worktr
 `/land` says why. When nib can still load what remains, `/land discard` finishes
 the removal. Otherwise it stops the session from using the worktree without
 deleting anything: switch a worktree that is off its branch back to it, or remove
-what remains under `.nib/worktrees/sessions/` by hand.
+what remains under `~/.nib/projects/<project-key>/worktrees/sessions/` (or, for a
+worktree an older version created, `.nib/worktrees/sessions/`) by hand.
 
 Subagents, scheduled tasks and calls through `nib mcp-server` always use their own
 worktrees. When nib merges a subagent's work into the folder, the folder must have
@@ -1499,8 +1659,8 @@ Incident codes and default recovery actions are:
 
 Provider response bodies, remote messages, prompt echoes, credentials, continuations,
 and arbitrary metadata are intentionally omitted. The stable outcome and safe typed
-fields are available in the session's reconciliation event under
-`.nib/profiles/<profile>/sessions/<session-id>.json`; the rendered sentence is not
+fields are available in the session's reconciliation event, stored with the session
+in `~/.nib/nib.db`; the rendered sentence is not
 persisted. `nib doctor` shows the resolved local provider and transport without making
 a paid provider request. The interactive session remains available for another command
 after a safely reconciled failure; `nib run` exits nonzero.
@@ -1564,8 +1724,10 @@ rm ~/.local/bin/nib
 Remove-Item "$env:USERPROFILE\.local\bin\nib.exe" -Force
 ```
 
-Project `.nib/` directories contain configuration, credentials, sessions, worktrees,
-branches, and memory. Do not delete them while Git still registers nib worktrees.
+Project `.nib/` directories contain preferences, sessions and, from older versions,
+worktrees and runtime state. `~/.nib` contains your configuration, credentials,
+each project's runtime state and the worktrees nib created. Do not delete either
+while Git still registers nib worktrees.
 Failed creation or cleanup may intentionally preserve an unproven registration, path,
 or ref. Inspect the porcelain listing and remove only entries you have verified, then
 review the associated branches:
@@ -1576,6 +1738,7 @@ git worktree remove /path/from/the/list
 git branch --list 'nib/session/*' 'nib/subagent/*'
 git worktree prune
 rm -rf /path/to/project/.nib
+rm -rf ~/.nib  # every project's state, and your credentials
 ```
 
 Delete branches only after reviewing or merging their changes. Global skills are

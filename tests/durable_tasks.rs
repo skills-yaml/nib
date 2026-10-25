@@ -304,16 +304,26 @@ fn detached_terminal_redacts_profile_and_config_secrets_before_persistence() {
     }
 
     let store = SessionStore::for_project(root.path()).expect("profile sessions");
-    let session_path = store.sessions_dir().join(format!(
-        "{}.json",
-        store.get_latest_id().expect("session id")
-    ));
-    let raw_session = std::fs::read_to_string(session_path).expect("session JSON");
+    let session = store
+        .load(&store.get_latest_id().expect("session id"))
+        .expect("session");
+    let raw_session = serde_json::to_string(&session).expect("session JSON");
     assert!(!raw_session.contains(secret));
     assert!(!raw_session.contains(config_secret));
-    let raw_task = std::fs::read_to_string(root.path().join(format!(
-        ".nib/profiles/default/daemons/tasks/{task_id}.json"
-    )))
+    // Nothing reached the session database's files either (T082).
+    let database = store.database_path().expect("session database");
+    for suffix in ["", "-wal"] {
+        let mut path = database.as_os_str().to_owned();
+        path.push(suffix);
+        let bytes = std::fs::read(&path).unwrap_or_default();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(!text.contains(secret), "{}", database.display());
+        assert!(!text.contains(config_secret), "{}", database.display());
+    }
+    let raw_task = std::fs::read_to_string(
+        nib::paths::NibPaths::profile_state(root.path(), "default")
+            .join(format!("daemons/tasks/{task_id}.json")),
+    )
     .expect("task JSON");
     assert!(!raw_task.contains(secret));
     assert!(!raw_task.contains(config_secret));

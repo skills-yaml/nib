@@ -1,0 +1,4 @@
+# Tests and `cargo run` keep nib's user home inside the build directory, never
+# the developer's ~/.nib (T082). An explicit NIB_HOME still takes precedence.
+[env]
+NIB_HOME = { value = "target/test-nib-home", relative = true }

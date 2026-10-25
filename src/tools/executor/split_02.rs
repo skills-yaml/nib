@@ -574,7 +574,7 @@ pub(crate) fn instruction_policy_files(project_root: &Path) -> Vec<PathBuf> {
             files.push(path);
         }
     }
-    let skills_root = project_root.join(".nib").join("skills");
+    let skills_root = crate::paths::NibPaths::project_skills(project_root);
     if let Ok(entries) = std::fs::read_dir(skills_root) {
         files.extend(
             entries

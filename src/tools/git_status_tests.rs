@@ -72,7 +72,9 @@ async fn git_status_requires_strict_isolation_when_unavailable() {
         assert!(error.contains("strict Linux bwrap isolation"));
         assert!(error.contains("approved isolated terminal"));
     }
-    assert!(!root.path().join(".nib/worktrees").exists());
+    assert!(!crate::paths::NibPaths::project_state(root.path())
+        .join("worktrees")
+        .exists());
 }
 
 #[cfg(target_os = "linux")]
@@ -193,7 +195,9 @@ async fn git_status_bounds_output_without_mutating_repository() {
         .await
         .expect_err("bounded output")
         .contains("65536-byte limit"));
-    assert!(!root.path().join(".nib/worktrees").exists());
+    assert!(!crate::paths::NibPaths::project_state(root.path())
+        .join("worktrees")
+        .exists());
     assert!(!root.path().join(".git/index").exists());
 }
 
@@ -304,7 +308,8 @@ async fn git_status_reports_managed_worktree_under_home() {
     git(&project, &["add", "."]);
     git(&project, &["commit", "--quiet", "-m", "fixture"]);
     std::fs::write(project.join(".nib/config.toml"), "api_key = \"secret\"\n").unwrap();
-    let worktree = project.join(".nib/worktrees/sessions/s1");
+    crate::state_migration::ensure_state_identity(&project).expect("project state");
+    let worktree = crate::paths::NibPaths::project_state(&project).join("worktrees/sessions/s1");
     git(
         &project,
         &[

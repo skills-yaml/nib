@@ -213,6 +213,15 @@ mod cli_tests {
         assert!(args.fix);
         assert!(args.confirm_no_legacy_processes);
         assert!(Cli::try_parse_from(["nib", "doctor", "--confirm-no-legacy-processes"]).is_err());
+
+        // T082: naming the old folder confirms a re-link, which needs --fix.
+        let parsed = Cli::try_parse_from(["nib", "doctor", "--fix", "--relink", "/old/project"])
+            .expect("re-link option");
+        let Some(Commands::Doctor(args)) = parsed.command else {
+            panic!("expected doctor command");
+        };
+        assert_eq!(args.relink.as_deref(), Some("/old/project"));
+        assert!(Cli::try_parse_from(["nib", "doctor", "--relink", "/old/project"]).is_err());
     }
 }
 

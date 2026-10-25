@@ -888,11 +888,7 @@ impl Worktree {
         let branch_oid = parse_git_oid(&head, "plan subagent worktree base")?;
         Ok(WorktreePreparationAuthority {
             id: safe_id.clone(),
-            path: project_root
-                .join(".nib")
-                .join("worktrees")
-                .join("subagents")
-                .join(safe_id),
+            path: crate::paths::NibPaths::subagent_worktrees(&project_root).join(safe_id),
             branch,
             branch_oid,
             ownership_receipt_id: uuid::Uuid::new_v4().to_string(),
@@ -916,11 +912,7 @@ impl Worktree {
         let branch_oid = parse_git_oid(&head, "plan subagent worktree base")?;
         Ok(WorktreePreparationAuthority {
             id: safe_id.clone(),
-            path: project_root
-                .join(".nib")
-                .join("worktrees")
-                .join("subagents")
-                .join(safe_id),
+            path: crate::paths::NibPaths::subagent_worktrees(&project_root).join(safe_id),
             branch,
             branch_oid,
             ownership_receipt_id: uuid::Uuid::new_v4().to_string(),
@@ -1104,11 +1096,8 @@ impl Worktree {
             ));
         }
         let worktree_path = authority.path.clone();
-        let expected_path = project_root
-            .join(".nib")
-            .join("worktrees")
-            .join("subagents")
-            .join(&safe_id);
+        let expected_path =
+            crate::paths::NibPaths::subagent_worktrees(&project_root).join(&safe_id);
         if worktree_path != expected_path || authority.id != safe_id {
             return Err(
                 "planned subagent worktree authority does not match the repository".to_string(),
@@ -1117,7 +1106,12 @@ impl Worktree {
         let parent = worktree_path
             .parent()
             .ok_or("subagent worktree has no parent directory")?;
-        let root_directory = crate::daemons::state::StableDirectory::open(&project_root)?;
+        let state = crate::paths::NibPaths::project_state(&project_root);
+        crate::state_migration::ensure_state_identity(&project_root)
+            .map_err(|error| format!("subagent worktree parent is unsafe: {error}"))?;
+        let state_parent = crate::state_migration::ensure_state_parent(&state)
+            .map_err(|error| format!("subagent worktree parent is unsafe: {error}"))?;
+        let root_directory = crate::daemons::state::StableDirectory::open(&state_parent)?;
         let canonical_parent_directory = root_directory
             .open_or_create_descendant_directory_with_guard(
                 parent,
@@ -1126,7 +1120,7 @@ impl Worktree {
             )?;
         let canonical_parent = canonical_parent_directory.path().to_path_buf();
         external_guard()?;
-        if !canonical_parent.starts_with(&project_root) {
+        if !canonical_parent.starts_with(&state) {
             return Err(format!(
                 "subagent worktree parent escapes the repository: {}",
                 parent.display()
@@ -1473,11 +1467,8 @@ impl Worktree {
             ));
         }
         let worktree_path = authority.path.clone();
-        let expected_path = project_root
-            .join(".nib")
-            .join("worktrees")
-            .join("subagents")
-            .join(&safe_id);
+        let expected_path =
+            crate::paths::NibPaths::subagent_worktrees(&project_root).join(&safe_id);
         if worktree_path != expected_path || authority.id != safe_id {
             return Err(
                 "planned subagent worktree authority does not match the repository".to_string(),
@@ -1486,7 +1477,12 @@ impl Worktree {
         let parent = worktree_path
             .parent()
             .ok_or("subagent worktree has no parent directory")?;
-        let root_directory = crate::daemons::state::StableDirectory::open(&project_root)?;
+        let state = crate::paths::NibPaths::project_state(&project_root);
+        crate::state_migration::ensure_state_identity(&project_root)
+            .map_err(|error| format!("subagent worktree parent is unsafe: {error}"))?;
+        let state_parent = crate::state_migration::ensure_state_parent(&state)
+            .map_err(|error| format!("subagent worktree parent is unsafe: {error}"))?;
+        let root_directory = crate::daemons::state::StableDirectory::open(&state_parent)?;
         let canonical_parent_directory = root_directory
             .open_or_create_descendant_directory_with_guard(
                 parent,
@@ -1495,7 +1491,7 @@ impl Worktree {
             )?;
         let canonical_parent = canonical_parent_directory.path().to_path_buf();
         external_guard()?;
-        if !canonical_parent.starts_with(&project_root) {
+        if !canonical_parent.starts_with(&state) {
             return Err(format!(
                 "subagent worktree parent escapes the repository: {}",
                 parent.display()

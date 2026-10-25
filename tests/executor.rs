@@ -416,7 +416,9 @@ async fn agents_policy_denies_before_creating_a_worktree() {
 
     assert!(!result.success);
     assert_eq!(result.approval_source.as_deref(), Some("policy"));
-    assert!(!root.path().join(".nib/worktrees").exists());
+    assert!(!nib::paths::NibPaths::project_state(root.path())
+        .join("worktrees")
+        .exists());
     let session = store.load("policy-test").expect("audit session");
     assert_eq!(session.tool_calls.len(), 1);
     assert_eq!(
@@ -593,7 +595,9 @@ async fn invalid_unknown_or_weaker_agents_boundary_profiles_fail_before_approval
         assert_eq!(result.approval_source.as_deref(), Some("policy"));
         assert_eq!(approvals.load(Ordering::SeqCst), 0);
         assert!(!root.path().join("must-not-exist").exists());
-        assert!(!root.path().join(".nib/worktrees").exists());
+        assert!(!nib::paths::NibPaths::project_state(root.path())
+            .join("worktrees")
+            .exists());
         let session = store.load(session_id).expect("denial audit");
         let record = session.tool_calls.last().expect("denied tool record");
         assert!(record.worktree_path.is_none());
@@ -649,7 +653,7 @@ async fn mutating_tools_require_an_approved_plan() {
         .error
         .unwrap()
         .contains("approved persisted session plan"));
-    assert!(!root.path().join(".nib/worktrees/sessions").exists());
+    assert!(!nib::paths::NibPaths::session_worktrees(root.path()).exists());
 
     let mut session = store.load("planned").expect("plan session");
     session.plan.as_mut().unwrap().approve();
@@ -891,7 +895,7 @@ async fn patch_defaults_to_dry_run_and_terminal_nonzero_is_failure() {
         .contains("after-tool hook from failing-skill failed"));
 
     let raw_audit =
-        std::fs::read_to_string(store.sessions_dir().join("edit-test.json")).expect("raw audit");
+        serde_json::to_string(&store.load("edit-test").expect("audit session")).expect("raw audit");
     assert!(raw_audit.contains("NIB_HOOK_VALUE"));
     assert!(!raw_audit.contains("profile-value"));
 }
@@ -999,12 +1003,12 @@ async fn background_terminal_success_returns_to_trusted_session_context() {
         observation["result"]["stdout"],
         "first line\nsecond\tline\n"
     );
+    // The profile's daemons live in nib's user home, apart from its sessions.
     let audit = nib::daemons::task::DaemonAuditLog::at_path(
-        store
-            .sessions_dir()
-            .parent()
-            .unwrap()
-            .join("daemons/audit.jsonl"),
+        nib::daemons::workload::DurableTaskStore::from_sessions_dir(store.sessions_dir())
+            .expect("profile daemons")
+            .daemon_dir()
+            .join("audit.jsonl"),
     )
     .read_all()
     .expect("daemon audit");
@@ -1099,12 +1103,12 @@ async fn background_terminal_failure_returns_to_trusted_session_context() {
         .as_str()
         .unwrap()
         .contains("command exited with 9"));
+    // The profile's daemons live in nib's user home, apart from its sessions.
     let audit = nib::daemons::task::DaemonAuditLog::at_path(
-        store
-            .sessions_dir()
-            .parent()
-            .unwrap()
-            .join("daemons/audit.jsonl"),
+        nib::daemons::workload::DurableTaskStore::from_sessions_dir(store.sessions_dir())
+            .expect("profile daemons")
+            .daemon_dir()
+            .join("audit.jsonl"),
     )
     .read_all()
     .expect("daemon audit");

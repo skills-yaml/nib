@@ -562,7 +562,7 @@ async fn start_portable_terminal_tree(
         let git_file = std::fs::read_to_string(root.join(".git"));
         let root_entries = diagnostic_directory_entries(root);
         let session_worktree_entries = diagnostic_directory_entries(
-            &root.join(".nib/worktrees/sessions"),
+            &nib::paths::NibPaths::project_state(root).join("worktrees/sessions"),
         );
         panic!(
             "portable terminal fixture did not start; requested_heartbeat={requested_heartbeat:?}; requested_shell_entry={requested_shell_entry:?}; shell_entry={shell_entry:#?}; requested_trace={requested_trace:?}; trace={trace:#?}; git_file={git_file:#?}; root_entries={root_entries:#?}; session_worktree_entries={session_worktree_entries:#?}; command={command:?}; sessions={sessions:#?}"
@@ -582,7 +582,7 @@ async fn start_portable_terminal_tree(
         heartbeat_name,
     )
     .await;
-    let session_worktrees = root.join(".nib/worktrees/sessions");
+    let session_worktrees = nib::paths::NibPaths::project_state(root).join("worktrees/sessions");
     assert!(
         !session_worktrees.exists()
             || std::fs::read_dir(&session_worktrees)
@@ -652,9 +652,8 @@ async fn nib_run_start_response_exposes_only_public_job_and_session_identity() {
 
     let persisted: serde_json::Value = serde_json::from_slice(
         &std::fs::read(
-            project
-                .path()
-                .join(".nib/subagents")
+            nib::paths::NibPaths::project_state(project.path())
+                .join("subagents")
                 .join(format!("{subagent_id}.json")),
         )
         .expect("persisted subagent record"),
@@ -2300,7 +2299,8 @@ async fn nib_run_precommit_cancellation_kills_git_and_leaves_no_spawn_state() {
         "precommit cancellation persisted {records:?}"
     );
     assert_process_tree_stops(&git_pids).await;
-    let worktree_root = project.path().join(".nib/worktrees/subagents");
+    let worktree_root =
+        nib::paths::NibPaths::project_state(project.path()).join("worktrees/subagents");
     assert!(
         !worktree_root.exists()
             || std::fs::read_dir(&worktree_root)
@@ -2327,7 +2327,8 @@ async fn nib_run_precommit_cancellation_kills_git_and_leaves_no_spawn_state() {
         .expect("list worktrees");
     assert!(worktrees.status.success());
     assert!(
-        !String::from_utf8_lossy(&worktrees.stdout).contains(".nib/worktrees/subagents"),
+        !String::from_utf8_lossy(&worktrees.stdout)
+            .contains(worktree_root.to_str().expect("UTF-8 worktree root")),
         "precommit worktree remained registered"
     );
     wait_for_nib_run_cancellation_audit(project.path()).await;
@@ -2448,7 +2449,8 @@ async fn nib_run_worktree_add_failure_preserves_unproven_registration() {
             .contains("post-snapshot Git worktree registration lacks exact creation attribution"),
         "{reconciliation}"
     );
-    let preparations = project.path().join(".nib/subagents/.preparations");
+    let preparations =
+        nib::paths::NibPaths::project_state(project.path()).join("subagents/.preparations");
     assert!(
         std::fs::read_dir(&preparations)
             .expect("retained spawn preparation namespace")
@@ -2456,7 +2458,8 @@ async fn nib_run_worktree_add_failure_preserves_unproven_registration() {
             .is_some(),
         "indeterminate worktree constructor error retired its recovery intent"
     );
-    let worktree_root = project.path().join(".nib/worktrees/subagents");
+    let worktree_root =
+        nib::paths::NibPaths::project_state(project.path()).join("worktrees/subagents");
     assert!(
         !worktree_root.exists()
             || std::fs::read_dir(&worktree_root)
@@ -2483,7 +2486,8 @@ async fn nib_run_worktree_add_failure_preserves_unproven_registration() {
         .expect("list worktrees");
     assert!(worktrees.status.success());
     assert!(
-        String::from_utf8_lossy(&worktrees.stdout).contains(".nib/worktrees/subagents"),
+        String::from_utf8_lossy(&worktrees.stdout)
+            .contains(worktree_root.to_str().expect("UTF-8 worktree root")),
         "unproven post-error registration was deleted"
     );
     let store = observed_session_store(project.path());

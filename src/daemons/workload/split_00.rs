@@ -352,18 +352,42 @@ impl DurableTaskStore {
     }
 
     pub fn from_sessions_dir(sessions_dir: &Path) -> Result<Self, String> {
+        Self::at_daemon_dir(Self::profile_daemon_dir(sessions_dir)?)
+    }
+
+    /// The daemon directory of the profile that owns `sessions_dir`: the
+    /// profile is resolved, also for sessions in nib's user home (T082);
+    /// sessions outside a configured workspace keep their state beside them.
+    pub(crate) fn profile_daemon_dir(sessions_dir: &Path) -> Result<PathBuf, String> {
+        if let Ok(profile) = Self::resolve_profile(sessions_dir) {
+            return Ok(profile.daemon_dir().to_path_buf());
+        }
         let profile_state = sessions_dir
             .parent()
             .ok_or("session directory has no profile state parent")?;
-        Self::at_daemon_dir(profile_state.join("daemons"))
+        Ok(profile_state.join("daemons"))
     }
 
     pub fn resolve_profile_scope(sessions_dir: &Path) -> Result<(PathBuf, String), String> {
-        let sessions_dir = sessions_dir
+        let profile = Self::resolve_profile(sessions_dir)?;
+        Ok((profile.root_path().to_path_buf(), profile.id().to_string()))
+    }
+
+    fn resolve_profile(sessions_dir: &Path) -> Result<crate::profile::Profile, String> {
+        let sessions_dir = crate::state_migration::moved_sessions_dir(sessions_dir)
+            .as_deref()
+            .unwrap_or(sessions_dir)
             .canonicalize()
             .map_err(|error| format!("failed to resolve originating sessions: {error}"))?;
-        for candidate in sessions_dir.ancestors().skip(1) {
-            if !candidate.join(".nib").is_dir() {
+        // Sessions in nib's user home belong to the project its state
+        // directory records (T082).
+        let owner = crate::paths::NibPaths::state_owner(&sessions_dir);
+        for candidate in owner
+            .iter()
+            .map(PathBuf::as_path)
+            .chain(sessions_dir.ancestors().skip(1))
+        {
+            if !crate::paths::NibPaths::project_dir(candidate).is_dir() {
                 continue;
             }
             let Ok(config) = crate::config::load_nib_config_full(candidate) else {
@@ -378,7 +402,7 @@ impl DurableTaskStore {
                     .canonicalize()
                     .is_ok_and(|path| path == sessions_dir)
                 {
-                    return Ok((profile.root_path().to_path_buf(), profile.id().to_string()));
+                    return Ok(profile.clone());
                 }
             }
         }

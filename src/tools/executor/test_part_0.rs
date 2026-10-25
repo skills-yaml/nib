@@ -666,9 +666,9 @@ async fn non_utf8_session_audit_destination_fails_closed_without_partial_delegat
     }
 
     for path in [
-        workspace.join(".nib/subagents"),
-        workspace.join(".nib/subagent-owner-leases"),
-        workspace.join(".nib/worktrees/subagents"),
+        crate::paths::NibPaths::project_state(&workspace).join("subagents"),
+        crate::paths::NibPaths::project_state(&workspace).join("subagent-owner-leases"),
+        crate::paths::NibPaths::project_state(&workspace).join("worktrees/subagents"),
     ] {
         assert!(
             !path.exists(),
@@ -1396,12 +1396,9 @@ async fn schedule_uses_executor_owned_session_context() {
         ..crate::config::ProfileConfig::default()
     }];
     crate::config::save_nib_config_full(root.path(), &mut config).expect("profile config");
-    let sessions_dir = root
-        .path()
-        .join(".nib")
-        .join("profiles")
-        .join("selected")
-        .join("sessions");
+    crate::profile::ProfileRegistry::load(root.path(), &config.profiles).expect("profiles");
+    let sessions_dir =
+        crate::paths::NibPaths::profile_sessions(&root.path().canonicalize().unwrap(), "selected");
     let store = SessionStore::at_dir(sessions_dir.clone());
     store.create_session_with_id("origin");
     let mut executor = ToolExecutor::new(root.path().to_path_buf(), ExecutionConfig::default())

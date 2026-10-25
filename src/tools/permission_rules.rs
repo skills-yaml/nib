@@ -174,65 +174,16 @@ struct PermissionsFile {
     projects: BTreeMap<String, ProjectEntry>,
 }
 
-/// `$NIB_HOME`, else `~/.nib`. Unit tests use only `TestNibHome`, never
-/// the developer's home or the process environment.
-pub(crate) fn nib_home() -> Option<PathBuf> {
-    #[cfg(test)]
-    {
-        TEST_HOME.with(|home| home.borrow().clone())
-    }
-    #[cfg(not(test))]
-    {
-        if let Some(path) = std::env::var_os("NIB_HOME").filter(|value| !value.is_empty()) {
-            return Some(PathBuf::from(path));
-        }
-        std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .filter(|value| !value.is_empty())
-            .map(|home| PathBuf::from(home).join(".nib"))
-    }
-}
-
 /// Settings are keyed by the canonical project folder. A linked Git worktree
 /// (a session or subagent worktree) uses its main project's settings.
 fn project_key(project_root: &Path) -> Option<String> {
-    let root = project_root.canonicalize().ok()?;
-    let root = main_worktree(&root).unwrap_or(root);
-    Some(root.display().to_string())
+    crate::paths::NibPaths::project_identity_root(project_root)
+        .map(|root| root.display().to_string())
 }
 
 /// The main checkout when `root` is a linked Git worktree.
 pub(crate) fn linked_worktree_main(root: &Path) -> Option<PathBuf> {
-    main_worktree(&root.canonicalize().ok()?)
-}
-
-/// The main checkout of a linked worktree, accepted only when the repository
-/// links back to this worktree, so a crafted `.git` file cannot claim
-/// another project's trust.
-fn main_worktree(root: &Path) -> Option<PathBuf> {
-    let pointer = root.join(".git");
-    if !std::fs::symlink_metadata(&pointer)
-        .ok()?
-        .file_type()
-        .is_file()
-    {
-        return None;
-    }
-    let text = read_bounded(&pointer)?;
-    let gitdir = root
-        .join(text.trim().strip_prefix("gitdir:")?.trim())
-        .canonicalize()
-        .ok()?;
-    let back_link = read_bounded(&gitdir.join("gitdir"))?;
-    if gitdir.join(back_link.trim()).canonicalize().ok()? != pointer.canonicalize().ok()? {
-        return None;
-    }
-    let common = read_bounded(&gitdir.join("commondir"))?;
-    let common = gitdir.join(common.trim()).canonicalize().ok()?;
-    if common.file_name()? != ".git" || gitdir.parent()? != common.join("worktrees") {
-        return None;
-    }
-    common.parent().map(Path::to_path_buf)
+    crate::paths::NibPaths::linked_worktree_main(root)
 }
 
 fn read_bounded(path: &Path) -> Option<String> {
@@ -280,7 +231,7 @@ pub(crate) struct RuleSet {
 impl RuleSet {
     pub(crate) fn load(project_root: &Path) -> Self {
         let mut set = Self::default();
-        let Some(home) = nib_home() else {
+        let Some(home) = crate::paths::NibPaths::user_home() else {
             return set;
         };
         set.load_user_layer(&home);
@@ -455,7 +406,7 @@ fn policy_rule(rule: &PermissionRule, call: &ToolCall) -> PolicyRule {
 
 /// Whether the user has trusted rules shipped inside this project.
 pub(crate) fn project_trusted(project_root: &Path) -> bool {
-    let Some(home) = nib_home() else {
+    let Some(home) = crate::paths::NibPaths::user_home() else {
         return false;
     };
     let Some(key) = project_key(project_root) else {
@@ -473,7 +424,8 @@ fn update_project_entry(
     project_root: &Path,
     change: impl Fn(&mut ProjectEntry) -> Result<bool, String>,
 ) -> Result<bool, String> {
-    let home = nib_home().ok_or("no home directory for nib's user settings")?;
+    let home =
+        crate::paths::NibPaths::user_home().ok_or("no home directory for nib's user settings")?;
     let key = project_key(project_root)
         .ok_or("the project folder cannot be resolved for its settings")?;
     let home = crate::fs_security::ensure_directory_without_symlinks(&home)
@@ -586,37 +538,7 @@ pub(crate) fn set_project_trust(project_root: &Path, trusted: bool) -> Result<bo
 }
 
 #[cfg(test)]
-thread_local! {
-    static TEST_HOME: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
-}
-
-/// Gives the current thread a temporary nib home while it lives. Unit tests
-/// otherwise see no user settings at all.
-#[cfg(test)]
-pub(crate) struct TestNibHome {
-    pub(crate) directory: tempfile::TempDir,
-    previous: Option<PathBuf>,
-}
-
-#[cfg(test)]
-impl TestNibHome {
-    pub(crate) fn isolated() -> Self {
-        let directory = tempfile::tempdir().expect("nib home");
-        let previous = TEST_HOME.with(|home| home.replace(Some(directory.path().to_path_buf())));
-        Self {
-            directory,
-            previous,
-        }
-    }
-}
-
-#[cfg(test)]
-impl Drop for TestNibHome {
-    fn drop(&mut self) {
-        let previous = self.previous.take();
-        TEST_HOME.with(|home| *home.borrow_mut() = previous);
-    }
-}
+pub(crate) use crate::paths::TestNibHome;
 
 #[cfg(test)]
 #[path = "permission_rules_tests.rs"]

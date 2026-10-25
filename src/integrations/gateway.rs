@@ -826,10 +826,10 @@ mod tests {
         assert_eq!(second_reply.reply_to.as_deref(), Some("2.0"));
 
         let store = SessionStore::for_project(root.path()).expect("profile session store");
-        assert!(store
-            .sessions_dir()
-            .join(format!("{session_id}.json"))
-            .is_file());
+        assert!(
+            store.database.is_some(),
+            "sessions live in the session database"
+        );
         assert_eq!(store.list(), vec![session_id.clone()]);
         let session = store.load(&session_id).expect("persisted gateway session");
         session

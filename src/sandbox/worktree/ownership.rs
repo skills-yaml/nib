@@ -282,8 +282,10 @@ impl From<&str> for ManagedWorktreeCaptureError {
 pub(crate) fn managed_worktree_ownership_directory(
     project_root: &Path,
 ) -> Result<crate::daemons::state::StableDirectory, String> {
-    let nib = crate::fs_security::ensure_directory_without_symlinks(&project_root.join(".nib"))
-        .map_err(|error| format!("managed worktree state root is unsafe: {error}"))?;
+    let nib = crate::state_migration::ensure_state_directory(
+        &crate::paths::NibPaths::project_state(project_root),
+    )
+    .map_err(|error| format!("managed worktree state root is unsafe: {error}"))?;
     let directory = crate::fs_security::ensure_directory_without_symlinks(
         &nib.join(MANAGED_WORKTREE_OWNERSHIP_DIRECTORY),
     )
@@ -351,15 +353,24 @@ pub(crate) fn canonical_managed_worktree_reservation_paths(
             canonical_project_root.display()
         ));
     }
-    let relative_worktree_path = worktree_path
-        .strip_prefix(project_root)
-        .or_else(|_| worktree_path.strip_prefix(&canonical_project_root))
-        .map_err(|_| {
-            format!(
-                "managed worktree path is outside the project root: {}",
-                worktree_path.display()
-            )
-        })?;
+    // A managed worktree lives in the project's state directory: in nib's
+    // user home, or inside the project for legacy state.
+    let state = crate::paths::NibPaths::project_state(&canonical_project_root);
+    let canonical_state = state.canonicalize().unwrap_or_else(|_| state.clone());
+    let (base, relative_worktree_path) = [
+        (&canonical_project_root, project_root),
+        (&canonical_project_root, canonical_project_root.as_path()),
+        (&canonical_state, state.as_path()),
+        (&canonical_state, canonical_state.as_path()),
+    ]
+    .into_iter()
+    .find_map(|(base, prefix)| Some((base, worktree_path.strip_prefix(prefix).ok()?)))
+    .ok_or_else(|| {
+        format!(
+            "managed worktree path is outside the project root: {}",
+            worktree_path.display()
+        )
+    })?;
     if relative_worktree_path.as_os_str().is_empty()
         || relative_worktree_path
             .components()
@@ -367,7 +378,7 @@ pub(crate) fn canonical_managed_worktree_reservation_paths(
     {
         return Err("managed worktree path has an unsafe project-relative component".to_string());
     }
-    let canonical_worktree_path = canonical_project_root.join(relative_worktree_path);
+    let canonical_worktree_path = base.join(relative_worktree_path);
     Ok((canonical_project_root, canonical_worktree_path))
 }
 
@@ -457,8 +468,11 @@ pub(crate) fn validate_durable_ownership_record(
     if record.project_root != project_root {
         return Err("managed worktree ownership project root changed".to_string());
     }
-    let managed_root = project_root.join(".nib").join("worktrees");
-    if !record.worktree_path.is_absolute() || !record.worktree_path.starts_with(&managed_root) {
+    // Worktrees created before T082 stay in `<project>/.nib/worktrees`.
+    let managed = crate::paths::NibPaths::managed_worktree_roots(&project_root)
+        .iter()
+        .any(|root| record.worktree_path.starts_with(root));
+    if !record.worktree_path.is_absolute() || !managed {
         return Err("managed worktree ownership path escapes managed state".to_string());
     }
     let expected_worktree_staging =

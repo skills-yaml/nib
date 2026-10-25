@@ -228,7 +228,29 @@ pub(crate) fn subagent_namespace_snapshot(path: &Path) -> Vec<(PathBuf, Vec<u8>)
 
     let mut snapshot = Vec::new();
     visit(path, path, &mut snapshot);
+    snapshot.extend(for_project_state(path, |state| {
+        let mut state_snapshot = Vec::new();
+        visit(state, state, &mut state_snapshot);
+        state_snapshot
+    }));
     snapshot
+}
+
+/// The entries of a project's state directory, under a `<project state>`
+/// prefix, when the state lives outside `path` (in nib's user home), so a
+/// snapshot of a project still covers its runtime state (T082).
+fn for_project_state(
+    path: &Path,
+    visit: impl FnOnce(&Path) -> Vec<(PathBuf, Vec<u8>)>,
+) -> Vec<(PathBuf, Vec<u8>)> {
+    let state = crate::paths::NibPaths::project_state(path);
+    if state.starts_with(path) || !state.is_dir() {
+        return Vec::new();
+    }
+    visit(&state)
+        .into_iter()
+        .map(|(relative, bytes)| (Path::new("<project state>").join(relative), bytes))
+        .collect()
 }
 
 pub(crate) fn assert_spawn_cleanup_snapshot(
@@ -249,7 +271,11 @@ pub(crate) fn assert_spawn_cleanup_snapshot(
         .chain(after_map.keys())
         .filter(|path| before_map.get(*path) != after_map.get(*path))
         .filter(|path| {
-            let rendered = path.to_string_lossy().replace('\\', "/");
+            // The project's state is under `.nib`, or in nib's user home.
+            let rendered =
+                path.to_string_lossy()
+                    .replace('\\', "/")
+                    .replacen("<project state>/", ".nib/", 1);
             let complete_worktree_proof = rendered.starts_with(".nib/worktree-ownership/")
                 && rendered.ends_with(".json")
                 && !before_map.contains_key(*path)
@@ -313,6 +339,52 @@ pub(crate) fn assert_subagent_namespace_unchanged(
         added.is_empty() && removed.is_empty() && changed.is_empty(),
         "{context}: added={added:?}, removed={removed:?}, changed={changed:?}"
     );
+}
+
+/// Whether the default profile of a test project holds session `id`: a row
+/// of the session database, or a JSON file for a profile whose sessions stay
+/// files. Nothing is created.
+pub(crate) fn default_session_exists(root: &Path, id: &str) -> bool {
+    let root = root.canonicalize().expect("canonical test project");
+    let configured =
+        crate::paths::NibPaths::legacy_profile_state(&root, "default").join("sessions");
+    if configured.join(format!("{id}.json")).exists() {
+        return true;
+    }
+    session_exists_in(
+        &crate::paths::NibPaths::profile_sessions(&root, "default"),
+        id,
+    )
+}
+
+/// Whether the session directory `sessions` holds session `id`, in the
+/// session database or as a JSON file. Nothing is created.
+pub(crate) fn session_exists_in(sessions: &Path, id: &str) -> bool {
+    match crate::session::StoreDatabase::for_sessions_dir(sessions).expect("session database") {
+        Some(store) => store
+            .database
+            .load(&store.scope, id)
+            .expect("load audit session")
+            .is_some(),
+        None => sessions.join(format!("{id}.json")).exists(),
+    }
+}
+
+/// Configures the default profile of a test project with its state in
+/// `.nib/profiles/default`, as before T082, so its sessions stay JSON files
+/// whose atomic publication the crash tests observe.
+pub(crate) fn use_file_sessions(root: &Path) {
+    let mut config = crate::config::NibConfig::default();
+    config.profiles.active = vec![crate::config::ProfileConfig {
+        id: "default".to_string(),
+        root: PathBuf::from("."),
+        state_dir: Some(PathBuf::from(".nib/profiles/default")),
+        ..crate::config::ProfileConfig::default()
+    }];
+    crate::config::save_nib_config_full(root, &mut config).expect("file session profile");
+    // Load the profiles as every nib start does, which records where the
+    // project's state lives before anything runs.
+    crate::profile::ProfileRegistry::load(root, &config.profiles).expect("file session profiles");
 }
 
 pub(crate) fn initialize_spawn_test_repository(root: &Path) {
@@ -402,6 +474,11 @@ pub(crate) fn directory_tree_snapshot(path: &Path) -> Vec<(PathBuf, Vec<u8>)> {
 
     let mut snapshot = Vec::new();
     visit(path, path, &mut snapshot);
+    snapshot.extend(for_project_state(path, |state| {
+        let mut state_snapshot = Vec::new();
+        visit(state, state, &mut state_snapshot);
+        state_snapshot
+    }));
     snapshot
 }
 
@@ -489,7 +566,9 @@ pub(crate) fn install_completed_process_scope_with_outcome(
     scope.cleanup_proof = Some(proof.clone());
     scope.updated_at = Utc::now();
     std::fs::write(
-        root.join(".nib/process-scopes").join(format!("{id}.json")),
+        crate::paths::NibPaths::project_state(root)
+            .join("process-scopes")
+            .join(format!("{id}.json")),
         serde_json::to_vec_pretty(&scope).expect("encode complete scope"),
     )
     .expect("write complete scope");
@@ -535,7 +614,9 @@ pub(crate) fn install_completed_launch_abort_scope(
     scope.launch_abort_proof = Some(proof.clone());
     scope.updated_at = Utc::now();
     std::fs::write(
-        root.join(".nib/process-scopes").join(format!("{id}.json")),
+        crate::paths::NibPaths::project_state(root)
+            .join("process-scopes")
+            .join(format!("{id}.json")),
         serde_json::to_vec_pretty(&scope).expect("encode launch-abort scope"),
     )
     .expect("write launch-abort scope");
@@ -581,7 +662,9 @@ pub(crate) fn install_completed_process_scope_with_live_lease(
     scope.cleanup_proof = Some(proof.clone());
     scope.updated_at = Utc::now();
     std::fs::write(
-        root.join(".nib/process-scopes").join(format!("{id}.json")),
+        crate::paths::NibPaths::project_state(root)
+            .join("process-scopes")
+            .join(format!("{id}.json")),
         serde_json::to_vec_pretty(&scope).expect("encode complete scope"),
     )
     .expect("write complete scope");

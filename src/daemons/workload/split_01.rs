@@ -1344,7 +1344,9 @@ pub(crate) fn load_worker_profile(
         .sessions_dir()
         .canonicalize()
         .map_err(|error| format!("failed to resolve profile sessions: {error}"))?;
-    let actual_sessions = sessions_dir
+    let actual_sessions = crate::state_migration::moved_sessions_dir(sessions_dir)
+        .as_deref()
+        .unwrap_or(sessions_dir)
         .canonicalize()
         .map_err(|error| format!("failed to resolve task sessions: {error}"))?;
     if actual_sessions != expected_sessions {
@@ -1441,7 +1443,13 @@ pub(crate) fn validate_scoped_worker_paths(
     let cwd = cwd
         .canonicalize()
         .map_err(|error| format!("invalid durable task working directory: {error}"))?;
-    if !cwd.starts_with(&project_root) || !cwd.is_dir() {
+    // A task may work in one of the project's managed worktrees, which live
+    // in nib's user home (or, for legacy worktrees, in the project).
+    let in_managed_worktree = crate::paths::NibPaths::managed_worktree_roots(&project_root)
+        .iter()
+        .filter_map(|root| root.canonicalize().ok())
+        .any(|root| cwd.starts_with(root));
+    if !(cwd.starts_with(&project_root) || in_managed_worktree) || !cwd.is_dir() {
         return Err(format!(
             "durable task working directory escapes its project: {}",
             cwd.display()
