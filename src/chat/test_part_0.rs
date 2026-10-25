@@ -1245,3 +1245,36 @@ fn successful_recovery_frame_interrupts_on_esc_or_eof_without_submission() {
         nib::interactive::QuestionFormOutcome::InputClosed
     );
 }
+
+#[test]
+fn chat_model_picker_switches_to_another_configured_provider() {
+    let project = tempdir().expect("project");
+    let mut config = NibConfig::default();
+    config
+        .llm
+        .add_or_update_provider("openai".into(), "shared".into(), None);
+    config
+        .llm
+        .add_or_update_provider("openrouter".into(), "shared".into(), None);
+    config.llm.active_provider = Some("openai".into());
+    for entry in config.llm.providers.values_mut() {
+        entry.models = Some(vec![]);
+    }
+    config.skills.enabled = false;
+    config.daemons.cron_enabled = false;
+    config.daemons.curator_enabled = false;
+    save_nib_config_full(project.path(), &mut config).unwrap();
+    let _cwd = CurrentDirGuard::enter(project.path());
+    run_chat_with_input(
+        &ChatArgs {
+            session: None,
+            auth: false,
+            ..Default::default()
+        },
+        Cursor::new(b"/model\n2\n/quit\n"),
+    )
+    .unwrap();
+    let config = load_nib_config_full(project.path()).unwrap();
+    assert_eq!(config.llm.get_active_provider(), "openrouter");
+    assert_eq!(config.llm.providers["openrouter"].model, "shared");
+}

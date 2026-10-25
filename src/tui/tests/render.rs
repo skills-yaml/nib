@@ -1570,7 +1570,16 @@ fn model_picker_accepts_selection_exact_ids_and_cancel() {
     let selection = ModelSelection {
         provider: "mock".to_string(),
         current: "mock-a".to_string(),
-        available: vec!["mock-a".to_string(), "mock-b".to_string()],
+        available: vec![
+            ModelChoice {
+                provider: "mock".into(),
+                model: "mock-a".into(),
+            },
+            ModelChoice {
+                provider: "mock".into(),
+                model: "mock-b".into(),
+            },
+        ],
         sensitive_values: Vec::new(),
     };
     let mut picker = PendingModelSelection::new(selection.clone());
@@ -1581,7 +1590,10 @@ fn model_picker_accepts_selection_exact_ids_and_cancel() {
     );
     assert_eq!(
         model_action_for_key(&mut picker, KeyCode::Enter),
-        ModelAction::Submit("mock-b".to_string())
+        ModelAction::Submit(ModelChoice {
+            provider: "mock".into(),
+            model: "mock-b".into()
+        })
     );
 
     let mut exact = PendingModelSelection::new(selection);
@@ -1593,7 +1605,10 @@ fn model_picker_accepts_selection_exact_ids_and_cancel() {
     }
     assert_eq!(
         model_action_for_key(&mut exact, KeyCode::Enter),
-        ModelAction::Submit("gateway/custom".to_string())
+        ModelAction::Submit(ModelChoice {
+            provider: "mock".into(),
+            model: "gateway/custom".into()
+        })
     );
     assert_eq!(
         model_action_for_key(&mut exact, KeyCode::Esc),
@@ -1763,4 +1778,48 @@ fn session_list_matches_slash_option_style_without_a_caret() {
     assert!(!rendered.contains(">wrap-fix"), "{rendered}");
     assert!(!rendered.contains("> inspect"), "{rendered}");
     assert!(!rendered.contains("* wrap-fix"), "{rendered}");
+}
+
+#[test]
+fn model_picker_preserves_provider_identity_for_duplicate_ids() {
+    let directory = tempdir().unwrap();
+    let mut config = NibConfig::default();
+    config
+        .llm
+        .add_or_update_provider("openai".into(), "same".into(), None);
+    config
+        .llm
+        .add_or_update_provider("openrouter".into(), "same".into(), None);
+    config.llm.active_provider = Some("openrouter".into());
+    for entry in config.llm.providers.values_mut() {
+        entry.models = Some(vec![]);
+    }
+    crate::config::save_nib_config_full(directory.path(), &mut config).unwrap();
+    let store = SessionStore::at_dir(directory.path().join("sessions"));
+    let session = store.try_create_session().unwrap();
+    let InteractiveEffect::SelectModel(selection) = execute_interactive_command(
+        crate::interactive::InteractiveCommand::Model { selection: None },
+        directory.path(),
+        &store,
+        &session.id,
+    )
+    .unwrap() else {
+        panic!("model choices");
+    };
+    let mut picker = PendingModelSelection::new(selection);
+    assert_eq!(picker.selected_option, 1);
+    model_action_for_key(&mut picker, KeyCode::Up);
+    let ModelAction::Submit(choice) = model_action_for_key(&mut picker, KeyCode::Enter) else {
+        panic!("selected choice");
+    };
+    assert_eq!(choice.provider, "openai");
+    assert_eq!(choice.model, "same");
+    set_provider_model(directory.path(), &choice.provider, &choice.model).unwrap();
+    assert_eq!(
+        crate::config::load_nib_config_full(directory.path())
+            .unwrap()
+            .llm
+            .get_active_provider(),
+        "openai"
+    );
 }

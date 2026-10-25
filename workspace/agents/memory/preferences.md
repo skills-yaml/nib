@@ -65,3 +65,13 @@
   release notes), then `>_ nib (v<version>)` with the working directory under it.
 - Clarification: Keep the Session and Keys hints below the header.
 - Reference: [T086](../../specs/test/interactive/T086_codex_style_startup_screen.md).
+
+
+## 2026-10-25 - Select across configured providers
+
+- Source: user, explicit clarification
+- Confidence: high
+- Preference: `/model` must offer and use models from every configured provider,
+  switching provider with the chosen model. Show provider identity alongside each
+  option so identical IDs remain distinct; preserve opaque exact model IDs.
+- Reference: [T088](../../specs/development/llm-providers/T088_all_provider_model_selection.md).

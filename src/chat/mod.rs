@@ -12,11 +12,11 @@ use nib::interactive::{
     format_session_status, interactive_completions, interactive_session_candidate,
     maybe_assign_session_display_name, persist_queued_follow_up, project_session_conversation,
     queue_disposition_message, reduce_interaction, resolve_interactive_profile_scope,
-    resolve_session, set_active_model, validate_interactive_session_target, ActivityKind,
+    resolve_session, set_provider_model, validate_interactive_session_target, ActivityKind,
     DraftHistory, InteractionConsumer, InteractionDecision, InteractionInput, InteractionReduction,
     InteractionRunState, InteractionState, InteractionTerminalOutcome, InteractiveAgentMode,
-    InteractiveCommand, InteractiveEffect, InteractiveSessionSelection, ModelSelection,
-    SelectorDetailKind, SessionResolution, StreamDisplay,
+    InteractiveCommand, InteractiveEffect, InteractiveSessionSelection, ModelChoice,
+    ModelSelection, SelectorDetailKind, SessionResolution, StreamDisplay,
 };
 use nib::session::SessionStore;
 

@@ -11,13 +11,13 @@ use crate::interactive::{
     interactive_session_selection, is_legacy_thought_title, maybe_assign_session_display_name,
     meter_token_label, path_completions, persist_queued_follow_up, project_session_activities,
     queue_disposition_message, reduce_interaction, resolve_session,
-    restore_queued_follow_up_after_start_failure, set_active_model, thought_header_title,
+    restore_queued_follow_up_after_start_failure, set_provider_model, thought_header_title,
     truncate_display_cells, unicode_display_width, validate_interactive_session_target,
     wrapped_display_rows, ActivityEntry, ActivityKind, DraftHistory, DraftHistorySearch,
     InteractionConsumer, InteractionDecision, InteractionInput, InteractionReduction,
     InteractionRunState, InteractionState, InteractionTerminalOutcome, InteractiveAgentMode,
     InteractiveCompletion, InteractiveEffect, InteractiveSessionCandidate,
-    InteractiveSessionSelection, ModelSelection, SelectorDetailKind, StreamDisplay,
+    InteractiveSessionSelection, ModelChoice, ModelSelection, SelectorDetailKind, StreamDisplay,
     TranscriptViewport, TranscriptViewportAction, TuiChrome, MAX_DRAFT_HISTORY_QUERY_BYTES,
 };
 use crate::interactive::{bounded_public_text, control_safe_text};

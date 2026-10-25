@@ -1532,19 +1532,9 @@ pub fn execute_interactive_command_in_state(
         }
         InteractiveCommand::Model { selection: None } => {
             let config = load_nib_config_full(project_root).map_err(|error| error.to_string())?;
-            let sensitive_values = config.public_session_sensitive_values();
-            let provider = config.llm.get_active_provider();
-            let current = config
-                .llm
-                .get_provider(None)
-                .map(|entry| entry.model.clone())
-                .unwrap_or_default();
-            Ok(InteractiveEffect::SelectModel(ModelSelection {
-                available: config.llm.get_available_models(None),
-                provider,
-                current,
-                sensitive_values,
-            }))
+            Ok(InteractiveEffect::SelectModel(
+                super::model_selection::selection(&config),
+            ))
         }
         InteractiveCommand::Model {
             selection: Some(model),
@@ -1740,32 +1730,54 @@ pub(crate) fn persist_recovered_question_response(
 }
 
 pub fn set_active_model(project_root: &Path, model: &str) -> Result<String, String> {
+    save_selected_model(project_root, None, model)
+}
+
+pub fn set_provider_model(
+    project_root: &Path,
+    provider: &str,
+    model: &str,
+) -> Result<String, String> {
+    save_selected_model(project_root, Some(provider), model)
+}
+
+fn save_selected_model(
+    project_root: &Path,
+    provider: Option<&str>,
+    model: &str,
+) -> Result<String, String> {
     let model = model.trim();
     if model.is_empty() {
         return Err("model ID must not be empty".to_string());
     }
     let config = load_nib_config_full(project_root).map_err(|error| error.to_string())?;
     let sensitive_values = config.public_session_sensitive_values();
-    let provider = config.llm.get_active_provider();
+    let implicit_provider = provider.is_none();
+    let provider = provider
+        .map(str::to_string)
+        .unwrap_or_else(|| config.llm.get_active_provider());
     let selected_provider = provider.clone();
     let selected_model = model.to_string();
     let configured = config.llm.providers.contains_key(&selected_provider);
     update_nib_config(project_root, move |config| {
         if let Some(entry) = config.llm.providers.get_mut(&selected_provider) {
             entry.model = selected_model;
+            config.llm.active_provider = Some(selected_provider);
             Ok(())
         } else if configured {
-            // The provider is configured for the user; the project keeps
-            // only its model choice.
+            // User-level providers need only a project model preference.
             config.llm.providers.insert(
-                selected_provider,
+                selected_provider.clone(),
                 crate::config::ProviderEntry {
                     model: selected_model,
                     ..crate::config::ProviderEntry::default()
                 },
             );
+            config.llm.active_provider = Some(selected_provider);
             Ok(())
-        } else if selected_provider == "mock" {
+        } else if selected_provider == "mock"
+            && (implicit_provider || config.llm.providers.is_empty())
+        {
             config
                 .llm
                 .add_or_update_provider(selected_provider, selected_model, None);
