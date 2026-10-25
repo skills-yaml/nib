@@ -21,12 +21,28 @@ credentials and transport settings. No live discovery or workload migration.
   missing providers and empty model selections fail without mutation.
 - [ ] AC-4: Regression tests, independent review and canonical gates pass.
 
-## Affected Areas and Plan
+## Affected Areas
 
 Shared interactive selection/reducer, plain selector labels, regression tests,
 user guide, spec catalog and release reservation. Build structured choices, persist
 provider/model in one config update, test selection and failure paths, review and
 run final gates. No execution-loop, delegation or external-system changes.
+
+## Implementation Plan
+
+1. Enumerate effective models for all configured providers into structured choices.
+2. Carry provider identity through both selectors and persist selection atomically.
+3. Verify duplicate/custom IDs, fallback, layered settings and both UI consumers.
+4. Reconcile documentation and memory, independently review and run native gates.
+
+## Risks and Rollback
+
+The exported selection type changes, requiring the reserved minor release. Model
+suggestions remain advisory: a provider may reject a listed model at runtime. The
+existing error handling applies. Configuration layering must retain credentials
+in user settings; regression coverage verifies that boundary. Rollback the code
+change to restore the previous picker; persisted provider/model selections remain
+valid configuration with no data migration.
 
 ## Validation Gates
 
