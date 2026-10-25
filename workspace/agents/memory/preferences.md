@@ -74,4 +74,4 @@
 - Preference: `/model` must offer and use models from every configured provider,
   switching provider with the chosen model. Show provider identity alongside each
   option so identical IDs remain distinct; preserve opaque exact model IDs.
-- Reference: [T088](../../specs/development/llm-providers/T088_all_provider_model_selection.md).
+- Reference: [T088](../../specs/test/llm-providers/T088_all_provider_model_selection.md).

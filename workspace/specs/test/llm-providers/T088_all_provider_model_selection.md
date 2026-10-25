@@ -1,6 +1,6 @@
 # T088: Select Models Across Configured Providers
 
-State: development
+State: test
 Primary Feature: llm-providers
 
 ## Scope
@@ -19,7 +19,7 @@ credentials and transport settings. No live discovery or workload migration.
   uses that active provider for the next run.
 - [x] AC-3: Unqualified exact IDs and single-provider behavior remain compatible;
   missing providers and empty model selections fail without mutation.
-- [ ] AC-4: Regression tests, independent review and canonical gates pass.
+- [x] AC-4: Regression tests, independent review and canonical gates pass.
 
 ## Affected Areas
 
@@ -63,10 +63,18 @@ Rationale: The explicit all-provider selection preference is recorded in
 
 ## Delivery
 
-No integration, main merge or publication yet. Missing peer board is preserved;
-existing worktrees and primary checkout remain untouched. Dedicated detached worktree
-initially based on published development 89156f6, then rebased onto shared
-development f8861c5 to preserve the newly integrated configuration layers. No coordination-board recovery attempted.
+Confirmed shared development merge at
+`76ed1bffe49769965a7ced6471aa884437e1437e` via
+[PR76](https://github.com/skills-yaml/nib/pull/76) on 2026-10-25T13:21:55Z,
+pinned to independently reviewed head `0d06470cdf23180d327ebd6e68c67d61ee6713b7`.
+The remote development ref was re-read at that merge, and Git confirms its tree
+is identical to the qualified head. T088 enters test; main delivery and publication
+are separate and remain unverified.
+
+The missing peer board is preserved; existing worktrees and the primary checkout
+remain untouched. The detached task worktree initially used published development
+89156f6, then rebased onto shared development f8861c5 to retain configuration layers.
+No coordination-board recovery was attempted.
 
 
 ## Review and Criterion Evidence
@@ -87,7 +95,18 @@ settings/factory diagnostics test pass. AC-3:
 also verifies the user file is byte-for-byte unchanged and project preferences
 contain neither credentials nor endpoints. Existing exact-ID tests pass.
 
-Canonical gates remain required on the frozen candidate. Test commands use one
+AC-4: `task test:interactive`, `task docs:check` (including workspace and version
+validation), and complete `task verify` passed on qualified head `0d06470`.
+The full suite passed 1,659 library tests, 115 CLI tests, every integration suite
+and strict Clippy/formatting checks. Hosted
+[CI40194451812](https://github.com/skills-yaml/nib/actions/runs/40194451812)
+passed Linux validation/coverage/release qualification/native terminal smokes and
+macOS tests/release qualification/native terminal smokes. Windows was skipped by
+the repository's development-branch workflow, not claimed qualified here.
+
+The records-only reconciliation receives independent review and fresh final
+`task docs:check` and `task verify`; those results are reported at handoff without
+rewriting the frozen records again. Test commands use one
 Cargo build job and disabled dev/test debug symbols to fit local memory; the
 initial default-debug lib-test compile was killed by the host. This changes no
 repository build policy or test selection. No paid provider requests are used.
