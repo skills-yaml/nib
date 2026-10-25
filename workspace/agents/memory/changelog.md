@@ -939,3 +939,19 @@ Content:
 Recorded in preferences.md that `/model` offers models across all configured
 providers and switches provider with the selected model. Provider/model identity
 is structured; typed exact IDs remain opaque. T088 tracks implementation and gates.
+
+
+## 2026-10-25 - Held-store invariant and publication reconciliation
+
+- Type: changelog
+- Source: T089, PR77, public development manifest and artifact-run evidence
+- Confidence: high
+- Review: independent exact-candidate review before delivery
+
+Content:
+
+Recorded the verified held-store migration invariant and the actual 0.7.0
+publication boundary in facts.md. Resolved T089's stale pending memory status.
+The ledger retains observed T088/T089 publication membership as released while
+explicitly superseding the stale open-reservation assumption; future runtime
+changes need a fresh target. No runtime source or native version changed.

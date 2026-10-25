@@ -585,3 +585,39 @@ T087, FT-022, FT-021 and T082 are integrated into shared development under
 the shared minor 0.6.0 and are in test. Windows verification of T082 (bundled
 SQLite and the PowerShell smoke) waits for delivery to main. The
 development channel published 0.6.0 at f8861c5; main delivery is separate.
+
+
+## 2026-10-25 - Held stores follow completed state migration
+
+- Type: fact
+- Source: T089, PR77 and deterministic store-relocation regression tests
+- Confidence: high
+- Review: independent exact-candidate review before delivery
+
+Content:
+
+Long-lived session and durable-task stores may re-resolve after T082 completes
+migration. A held session store whose legacy directory is missing follows the
+recorded migrated session location before taking a lock or publishing; the call
+body runs once. Renamed daemon/task directories must retain the held directory's
+identity, and locks and audit writes follow that same directory. Symlinks,
+replaced or foreign directories and missing completed-migration evidence still
+fail closed, without recreating legacy directories or duplicating a write.
+See [T089](../../specs/test/architecture/T089_long_lived_store_reresolve.md).
+
+## 2026-10-25 - Development 0.7.0 publication boundary
+
+- Type: fact
+- Source: public development manifest and successful artifact runs 40197272966, 40198975880 and 40214934850
+- Confidence: high
+- Review: independent exact-candidate review before delivery
+
+Content:
+
+Development 0.7.0 was published at 76ed1bf and 0677c56 before PR77 integrated
+T089. T089's assumption that the reservation was still open was stale at merge.
+The later publication at f2f0544 includes both T088 and T089. Historical records
+retain the actual published membership and close its reservation as released;
+that correction does not retroactively approve crossing the publication boundary.
+Future runtime implementation needs a fresh reservation. Main delivery and
+production publication remain separate.

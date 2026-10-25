@@ -196,10 +196,29 @@ T089 enters test. Main delivery and publication remain separate.
 
 | Component | Impact | Release | Rationale |
 | --- | --- | --- | --- |
-| nib | patch | nib-all-provider-models | Joins the already-applied 0.7.0 reservation. No second bump. Compatible recovery for a held store after T082 migration. |
+| nib | patch | nib-all-provider-models | Historical published 0.7.0 membership: compatible held-store recovery shipped at f2f0544. The publication reconciliation below supersedes the earlier open-reservation assumption; no new runtime version is invented for this records-only correction. |
 
 ## Memory Impact
 
-Status: pending
-Rationale: The re-resolve rule is durable, and it is written to project
-memory when this spec is verified. It stays pending until then.
+Status: updated
+Rationale: The verified held-store migration invariant is recorded in
+[workspace/agents/memory/facts.md](../../../agents/memory/facts.md) and
+[workspace/agents/memory/changelog.md](../../../agents/memory/changelog.md).
+
+
+## Publication Reconciliation (2026-10-25)
+
+The implementation plan above records the original reservation choice. At actual
+integration, 0.7.0 had already been published: artifact run 40197272966 completed
+at 13:36:04Z for 76ed1bf, and run 40198975880 completed at 14:00:03Z for 0677c56.
+Both precede PR77's 17:07:25Z merge. The earlier assumption that this release was
+still applied but unpublished was therefore stale. This is a historical policy
+mismatch, not retroactive permission to join a published reservation.
+
+Artifact run 40214934850 subsequently completed successfully at 17:22:47Z; the
+public development-latest manifest binds version 0.7.0 to
+`f2f0544e18cce06bf9ec7af6d2b2b62e6cffd715`, which includes T089. Preserve that
+actual published membership and mark its ledger reservation released. This
+reconciliation changes documentation only, so Cargo.toml, Cargo.lock and the
+project version in skills.yaml remain unchanged. Future runtime implementation
+must reserve a fresh target. Main delivery and production publication are separate.

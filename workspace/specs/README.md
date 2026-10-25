@@ -33,7 +33,7 @@ new work requires verified main merge. See [SDLC](../instructions/tech/sdlc.md).
 <!-- SPEC-CATALOG:START -->
 | Spec | Primary feature | State | Status rationale |
 | --- | --- | --- | --- |
-| [T089](test/architecture/T089_long_lived_store_reresolve.md) | architecture | test | Confirmed shared development merge f2f0544 via PR77 on 2026-10-25T17:07:25Z, pinned to reviewed head e3b74ad; patch member of applied 0.7.0; main delivery and publication remain separate. |
+| [T089](test/architecture/T089_long_lived_store_reresolve.md) | architecture | test | Confirmed shared development merge f2f0544 via PR77 on 2026-10-25T17:07:25Z, pinned to reviewed head e3b74ad; historical member of published development 0.7.0 at f2f0544; late-join publication mismatch is reconciled in the spec and ledger; main delivery and production publication remain separate. |
 | [T087](test/build-quality/T087_dead_code_and_test_cleanup.md) | build-quality | test | Confirmed shared development merge 89156f6 via PR71 (pinned to reviewed d3dc959) on 2026-10-25 after full task verify and Linux/macOS CI; shared minor 0.6.0; main delivery and publication remain separate. |
 | [T088](test/llm-providers/T088_all_provider_model_selection.md) | llm-providers | test | Confirmed shared development merge 76ed1bf via PR76 on 2026-10-25, pinned to independently reviewed and native/hosted-qualified 0d06470 with identical trees; minor 0.7.0; main delivery and publication remain separate. |
 | [T086](test/interactive/T086_codex_style_startup_screen.md) | interactive | test | Confirmed shared development merge fc10185 via PR68 (pinned to verified ff70dee) on 2026-10-22 after independent exact review and Linux/macOS CI; patch 0.5.2; main delivery and publication remain separate. |
@@ -265,12 +265,13 @@ work or narrower guarantees.
 ### Feature specs
 
 - [FT-022: Provider Prompt Caching](test/prompt-caching/ft_022_provider_prompt_caching.md)
-  — backlog proposal for stable request prefixes, opt-in provider cache controls,
-  and cache-read/write evidence; coverage, retention, and evaluation targets remain
-  open before development.
+  — implemented and integrated into development; provider cache controls and
+  offline validation are in test. Live savings measurement still requires
+  protected provider calls; main delivery remains separate.
 - [FT-021: Cost-Controlled Model Escalation](test/model-routing/ft_021_cost_controlled_model_escalation.md)
-  — backlog proposal for mostly cheaper/open-weight execution and bounded costly
-  assistance; hosting, budget, and quality targets remain open before development.
+  — implemented and integrated into development with bounded escalation and
+  offline validation; live quality/cost evaluation still requires protected
+  provider calls. Main delivery remains separate.
 - [FT-001: Basic Agent Tools](done/agent-runtime/ft_001_basic_agent_tools.md)
 - [FT-002: Base Architecture](done/architecture/ft_002_base_architecture.md)
 - [FT-003: Hybrid Sandboxing](done/tools-sandbox/ft_003_adopt_codex_sandboxing.md)
