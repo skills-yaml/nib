@@ -379,7 +379,9 @@ impl PendingModelSelection {
         let selected_option = selection
             .available
             .iter()
-            .position(|model| model == &selection.current)
+            .position(|model| {
+                model.provider == selection.provider && model.model == selection.current
+            })
             .unwrap_or(0);
         Self {
             selection,
@@ -392,7 +394,7 @@ impl PendingModelSelection {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ModelAction {
     Pending,
-    Submit(String),
+    Submit(ModelChoice),
     Cancel,
 }
 
@@ -432,7 +434,10 @@ pub(crate) fn model_action_for_key(
                 }
             }
             if !response.is_empty() {
-                ModelAction::Submit(response.to_string())
+                ModelAction::Submit(ModelChoice {
+                    provider: model.selection.provider.clone(),
+                    model: response.to_string(),
+                })
             } else if let Some(selected) = model.selection.available.get(model.selected_option) {
                 ModelAction::Submit(selected.clone())
             } else {

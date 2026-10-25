@@ -34,6 +34,7 @@ new work requires verified main merge. See [SDLC](../instructions/tech/sdlc.md).
 | Spec | Primary feature | State | Status rationale |
 | --- | --- | --- | --- |
 | [T087](development/build-quality/T087_dead_code_and_test_cleanup.md) | build-quality | development | Started 2026-10-22 under the user-requested goal: zero-test Task filters, unused exports, obsolete context/skill tests and the flaky editor smoke cases; shared minor 0.6.0. |
+| [T088](development/llm-providers/T088_all_provider_model_selection.md) | llm-providers | development | User-authorized all-provider selection fix; implementation and verification active; no integration or publication inferred. |
 | [T086](test/interactive/T086_codex_style_startup_screen.md) | interactive | test | Confirmed shared development merge fc10185 via PR68 (pinned to verified ff70dee) on 2026-10-22 after independent exact review and Linux/macOS CI; patch 0.5.2; main delivery and publication remain separate. |
 | [T083](test/skills-mcp/T083_progressive_skill_management.md) | skills-mcp | test | Confirmed shared development push at f83fc3874669e1ca1258381006c7f7434cd6dab6 after independent review and complete native verification; main delivery remains pending. |
 | [T085](test/interactive/T085_claude_style_waiting_indicator.md) | interactive | test | Confirmed shared development push93151e0 after exact review and full native task verify; main merge and publication remain separate. |
@@ -152,7 +153,7 @@ and Linux/macOS/Windows CI 37419726793 passed on that exact revision. Question
 forms, conversational recovery, Esc interruption and proposal chat are delivered;
 `/plan` and `/questions` are removed from interactive commands. See
 [T061](done/interactive/T061_question_form.md) for criterion evidence and actual events.
-Current catalog: **78 done, 7 test (T069-T073, T080, T086), 5 development (T023, T082, T087, FT-021, FT-022), and 0 backlog**. Publication is separate.
+Current catalog: **78 done, 7 test (T069-T073, T080, T086), 6 development (T023, T082, T087, T088, FT-021, FT-022), and 0 backlog**. Publication is separate.
 
 The 2026-07-15 audit inspected all 27 specs that had claimed completion. Unsupported
 claims moved through `development/`; missing feasible behavior was implemented and

@@ -39,13 +39,15 @@ pub(crate) fn render_model_selection(
             .iter()
             .enumerate()
             .map(|(offset, model)| {
-                let current = if model == &pending.selection.current {
+                let current = if model.provider == pending.selection.provider
+                    && model.model == pending.selection.current
+                {
                     "current"
                 } else {
                     ""
                 };
                 two_column_option(
-                    &safe_label(model),
+                    &safe_label(&model.label()),
                     current,
                     start + offset == pending.selected_option,
                     inner.width,

@@ -194,7 +194,7 @@
       "target": "0.6.0",
       "impact": "minor",
       "timing": "development-start",
-      "status": "applied",
+      "status": "released",
       "owner": "goal-base",
       "version_source": "Cargo.toml",
       "specs": [
@@ -203,7 +203,22 @@
         "workspace/specs/development/model-routing/ft_021_cost_controlled_model_escalation.md",
         "workspace/specs/development/prompt-caching/ft_022_provider_prompt_caching.md"
       ],
-      "evidence": "User-requested multi-agent goal on 2026-10-22 to implement and verify the open specs. Published development 0.5.2 (0af60f5) cannot be reused, so one shared minor 0.6.0 is reserved from it for T082, T087, FT-021 and FT-022. The peer board is not initialized on this machine, so the single-owner reservation is recorded here directly and validated by task versions:check. Owner goal-base applied Cargo.toml, Cargo.lock and skills.yaml once at development start, before the task branches; members do not apply another bump. Application is not integration, main delivery or publication."
+      "evidence": "User-requested multi-agent goal on 2026-10-22 to implement and verify the open specs. Published development 0.5.2 (0af60f5) cannot be reused, so one shared minor 0.6.0 is reserved from it for T082, T087, FT-021 and FT-022. The peer board is not initialized on this machine, so the single-owner reservation is recorded here directly and validated by task versions:check. Owner goal-base applied Cargo.toml, Cargo.lock and skills.yaml once at development start, before the task branches; members do not apply another bump. Application is not integration, main delivery or publication. Observed on 2026-10-25: the public development-latest manifest binds version 0.6.0 to 89156f697350f4baf77de9dfb6d5838dc77272fd; later changes require a fresh reservation."
+    },
+    {
+      "id": "nib-all-provider-models",
+      "component": "nib",
+      "baseline": "0.6.0",
+      "target": "0.7.0",
+      "impact": "minor",
+      "timing": "development-start",
+      "status": "applied",
+      "owner": "t088-model-picker",
+      "version_source": "Cargo.toml",
+      "specs": [
+        "workspace/specs/development/llm-providers/T088_all_provider_model_selection.md"
+      ],
+      "evidence": "User-authorized configured-provider selection correction on 2026-10-25. Public development-latest manifest reports 0.6.0 at 89156f697350f4baf77de9dfb6d5838dc77272fd. Peer runtime status refuses an uninitialized board; existing worktrees and ownership are preserved, following the established single-author ledger reservation fallback. Fresh minor 0.7.0 is reserved here and applied once by t088-model-picker to native mirrors at development start. No integration, main delivery or publication inferred. Independent review identified the publicly exported ModelSelection.available change as source-incompatible; the same unreleased reservation is corrected to minor 0.7.0 before integration artifacts."
     }
   ]
 }

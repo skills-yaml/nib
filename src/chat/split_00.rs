@@ -815,7 +815,7 @@ pub(crate) fn run_plain_with_input_and_modal_state(
                 }
                 Ok(InteractiveEffect::SelectModel(selection)) => {
                     if let Some(model) = select_model_from_console(&input, &selection)? {
-                        match set_active_model(project, &model) {
+                        match set_provider_model(project, &model.provider, &model.model) {
                             Ok(output) => println!("{}", public_output(&output)),
                             Err(error) => eprintln!("{}", public_output(&error)),
                         }
@@ -1265,7 +1265,7 @@ pub(crate) fn confirm_session_candidate(
 pub(crate) fn select_model_from_console(
     input: &ConsoleInput,
     selection: &ModelSelection,
-) -> Result<Option<String>, String> {
+) -> Result<Option<ModelChoice>, String> {
     let safe_label = |value: &str| {
         nib::interactive::bounded_public_text(value, &selection.sensitive_values, 512, false)
     };
@@ -1277,14 +1277,15 @@ pub(crate) fn select_model_from_console(
         );
         print!("Model name: ");
     } else {
-        println!("\nAvailable models for {provider}:");
+        println!("\nAvailable models (active provider: {provider}):");
         for (index, model) in selection.available.iter().enumerate() {
-            let marker = if model == &selection.current {
+            let marker = if model.provider == selection.provider && model.model == selection.current
+            {
                 " (current)"
             } else {
                 ""
             };
-            println!("  {}. {}{}", index + 1, safe_label(model), marker);
+            println!("  {}. {}{}", index + 1, safe_label(&model.label()), marker);
         }
         print!("Selection (number or exact model): ");
     }
@@ -1311,7 +1312,10 @@ pub(crate) fn select_model_from_console(
         println!("Invalid model number.");
         return Ok(None);
     }
-    Ok(Some(choice.to_string()))
+    Ok(Some(ModelChoice {
+        provider: selection.provider.clone(),
+        model: choice.to_string(),
+    }))
 }
 
 pub(crate) fn chat_queue_disposition(
