@@ -1,10 +1,11 @@
 # T087: Dead Code and Test Cleanup
 
-**Status:** Development. Started on 2026-10-22 under a user-requested goal. It
+**Status:** Test. Started on 2026-10-22 under the user-requested goal; integrated
+into shared development on 2026-10-25 via PR71 (89156f6). It
 replaces an uncommitted draft from another session (numbered T086 there, which
 collided with the merged startup-screen spec); this spec is rewritten from the
 draft's recorded findings.
-State: development
+State: test
 Primary Feature: build-quality
 
 ## Problem and Evidence
@@ -178,6 +179,19 @@ reverts independently.
 
 ## Memory Impact
 
-Status: pending
-Rationale: Classified when the cleanup is verified; a durable fact (focused
-test tasks must fail on zero tests) may result.
+Status: updated
+Rationale: The durable fact that every focused Task test command runs through the
+zero-test guard is recorded in
+[workspace/agents/memory/facts.md](../../../agents/memory/facts.md) and
+[workspace/agents/memory/changelog.md](../../../agents/memory/changelog.md).
+
+## Integration Evidence
+
+Revision: 89156f697350f4baf77de9dfb6d5838dc77272fd
+Outcome: passed
+
+Merged into shared development on 2026-10-25 via PR71, pinned to head
+d3dc959 after independent exact-candidate review of that head, full local `task verify`
+(NIB_REQUIRE_BWRAP_TESTS=1), the interactive release smoke and Linux/macOS CI.
+The merged tree equals the verified head. Main delivery and publication remain
+separate.

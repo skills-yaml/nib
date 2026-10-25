@@ -1,10 +1,7 @@
 # T089: Re-resolve a Held Store After State Migration
 
-**Status:** Development. Started on 2026-10-25 as the recorded follow-up to
-[T082](T082_user_home_runtime_state_and_sqlite_sessions.md). Implementation is
-active on `fix/t088-store-reresolve` and is not yet integrated into the shared
-`development` branch.
-State: development
+**Status:** Test. Confirmed shared development integration via PR 77.
+State: test
 Primary Feature: architecture
 
 ## Problem
@@ -102,7 +99,7 @@ fail-closed. No persisted format changes.
 
 ## Acceptance Criteria
 
-- [ ] AC-1: A session store and a durable-task store opened while migration
+- [x] AC-1: A session store and a durable-task store opened while migration
   is deferred still read and write the legacy directories. After another
   call migrates the project, the held stores' next write lands once in the
   user-home session database and the renamed task directory. The legacy
@@ -110,7 +107,7 @@ fail-closed. No persisted format changes.
   are not duplicated. The held store's audit line is appended once under
   the renamed daemon directory. Evidence:
   `state_migration::store_relocation_tests::held_stores_follow_a_migration_without_losing_or_duplicating_writes`.
-- [ ] AC-2: Replacing the opened directory with a symlink, or replacing it
+- [x] AC-2: Replacing the opened directory with a symlink, or replacing it
   with a new directory at the same path, still fails closed and leaves the
   replacement unchanged. A missing directory with no completed migration
   record is not redirected onto `~/.nib`. Evidence:
@@ -122,16 +119,17 @@ fail-closed. No persisted format changes.
   covers a symlink and a different inode at the migrated daemon path.
   The existing config and delegation fail-closed tests are named under
   Validation Gates.
-- [ ] AC-3: One call does not run its write twice. An unsafe migrated
+- [x] AC-3: One call does not run its write twice. An unsafe migrated
   session directory fails the call without writing the new event and
   without recreating the legacy directory. Evidence:
   `unsafe_migrated_session_directory_does_not_receive_a_second_write`,
   and the single `stopped` / `compensation_failed` counts in the AC-1 test.
-- [ ] AC-4: `task versions:check` accepts T089 as a patch member of the
+- [x] AC-4: `task versions:check` accepts T089 as a patch member of the
   already-applied 0.7.0 release. `task check` and `task verify` pass, and
   the interactive and managed-process release smokes pass on a debug
-  binary whose identity is the committed head. Evidence: pending until
-  those gates run on the frozen candidate.
+  binary whose identity is the committed head. Evidence: `task check`,
+  `task verify`, and both release smokes passed on `e3b74ad`; Linux Validate
+  and macOS CI 40201161005 passed on that head.
 
 ## Validation Gates
 
@@ -144,9 +142,17 @@ After those pass, `task check`, then `task verify` with
 `scripts/check-interactive-release.sh` plus
 `scripts/check-managed-process-release.sh` on that debug binary. Rebuild
 the binary after the final commit because the smokes require it to match
-HEAD. Integration is a pull request into `development`; this spec stays in
-development until that merge is confirmed. Windows CI is skipped on
-`development`.
+HEAD. Windows CI is skipped on `development`.
+
+## Integration Evidence
+
+Revision: f2f0544e18cce06bf9ec7af6d2b2b62e6cffd715
+Outcome: passed
+
+Confirmed shared development merge at
+`f2f0544e18cce06bf9ec7af6d2b2b62e6cffd715` via PR 77 on 2026-10-25T17:07:25Z,
+pinned to the reviewed head `e3b74ad0dd1c57bd4b33f80a523cf10e0bbd7a2c`.
+T089 enters test. Main delivery and publication remain separate.
 
 ## Risks
 
@@ -190,10 +196,29 @@ development until that merge is confirmed. Windows CI is skipped on
 
 | Component | Impact | Release | Rationale |
 | --- | --- | --- | --- |
-| nib | patch | nib-all-provider-models | Joins the already-applied 0.7.0 reservation. No second bump. Compatible recovery for a held store after T082 migration. |
+| nib | patch | nib-all-provider-models | Historical published 0.7.0 membership: compatible held-store recovery shipped at f2f0544. The publication reconciliation below supersedes the earlier open-reservation assumption; no new runtime version is invented for this records-only correction. |
 
 ## Memory Impact
 
-Status: pending
-Rationale: The re-resolve rule is durable, and it is written to project
-memory when this spec is verified. It stays pending until then.
+Status: updated
+Rationale: The verified held-store migration invariant is recorded in
+[workspace/agents/memory/facts.md](../../../agents/memory/facts.md) and
+[workspace/agents/memory/changelog.md](../../../agents/memory/changelog.md).
+
+
+## Publication Reconciliation (2026-10-25)
+
+The implementation plan above records the original reservation choice. At actual
+integration, 0.7.0 had already been published: artifact run 40197272966 completed
+at 13:36:04Z for 76ed1bf, and run 40198975880 completed at 14:00:03Z for 0677c56.
+Both precede PR77's 17:07:25Z merge. The earlier assumption that this release was
+still applied but unpublished was therefore stale. This is a historical policy
+mismatch, not retroactive permission to join a published reservation.
+
+Artifact run 40214934850 subsequently completed successfully at 17:22:47Z; the
+public development-latest manifest binds version 0.7.0 to
+`f2f0544e18cce06bf9ec7af6d2b2b62e6cffd715`, which includes T089. Preserve that
+actual published membership and mark its ledger reservation released. This
+reconciliation changes documentation only, so Cargo.toml, Cargo.lock and the
+project version in skills.yaml remain unchanged. Future runtime implementation
+must reserve a fresh target. Main delivery and production publication are separate.

@@ -198,12 +198,12 @@
       "owner": "goal-base",
       "version_source": "Cargo.toml",
       "specs": [
-        "workspace/specs/development/architecture/T082_user_home_runtime_state_and_sqlite_sessions.md",
-        "workspace/specs/development/build-quality/T087_dead_code_and_test_cleanup.md",
-        "workspace/specs/development/model-routing/ft_021_cost_controlled_model_escalation.md",
-        "workspace/specs/development/prompt-caching/ft_022_provider_prompt_caching.md"
+        "workspace/specs/test/architecture/T082_user_home_runtime_state_and_sqlite_sessions.md",
+        "workspace/specs/test/build-quality/T087_dead_code_and_test_cleanup.md",
+        "workspace/specs/test/model-routing/ft_021_cost_controlled_model_escalation.md",
+        "workspace/specs/test/prompt-caching/ft_022_provider_prompt_caching.md"
       ],
-      "evidence": "User-requested multi-agent goal on 2026-10-22 to implement and verify the open specs. Published development 0.5.2 (0af60f5) cannot be reused, so one shared minor 0.6.0 is reserved from it for T082, T087, FT-021 and FT-022. The peer board is not initialized on this machine, so the single-owner reservation is recorded here directly and validated by task versions:check. Owner goal-base applied Cargo.toml, Cargo.lock and skills.yaml once at development start, before the task branches; members do not apply another bump. Application is not integration, main delivery or publication. Observed on 2026-10-25: the public development-latest manifest binds version 0.6.0 to 89156f697350f4baf77de9dfb6d5838dc77272fd; later changes require a fresh reservation."
+      "evidence": "User-requested multi-agent goal on 2026-10-22 to implement and verify the open specs. Published development 0.5.2 (0af60f5) cannot be reused, so one shared minor 0.6.0 is reserved from it for T082, T087, FT-021 and FT-022. The peer board is not initialized on this machine, so the single-owner reservation is recorded here directly and validated by task versions:check. Owner goal-base applied Cargo.toml, Cargo.lock and skills.yaml once at development start, before the task branches; members do not apply another bump. Application is not integration, main delivery or publication. Confirmed shared development integration on 2026-10-25: T087 via PR71 at 89156f697350f4baf77de9dfb6d5838dc77272fd, FT-022 via PR72 at f8e30c0658932d87cfefc5305d82a9b44c13f3db, FT-021 via PR73 at 272c18e115fce13362812e7ba74e7e984b07e6f2 and T082 via PR74 at f8861c5eef05d17a56e85b9f7c67cd382a0b16e8, each merged pinned to its verified head; the members move to test without a second bump. Main delivery and publication remain separate. Observed on 2026-10-25: the public development-latest nib-release.json binds 0.6.0 to commit f8861c5eef05d17a56e85b9f7c67cd382a0b16e8, so 0.6.0 is released on the development channel."
     },
     {
       "id": "nib-all-provider-models",
@@ -212,13 +212,14 @@
       "target": "0.7.0",
       "impact": "minor",
       "timing": "development-start",
-      "status": "applied",
+      "status": "released",
       "owner": "t088-model-picker",
       "version_source": "Cargo.toml",
       "specs": [
         "workspace/specs/test/llm-providers/T088_all_provider_model_selection.md",
-        "workspace/specs/development/architecture/T089_long_lived_store_reresolve.md"
+        "workspace/specs/test/architecture/T089_long_lived_store_reresolve.md"
       ],
-      "evidence": "User-authorized configured-provider selection correction on 2026-10-25. Public development-latest manifest reports 0.6.0 at 89156f697350f4baf77de9dfb6d5838dc77272fd. Peer runtime status refuses an uninitialized board; existing worktrees and ownership are preserved, following the established single-author ledger reservation fallback. Fresh minor 0.7.0 is reserved here and applied once by t088-model-picker to native mirrors at development start. No integration, main delivery or publication inferred. Independent review identified the publicly exported ModelSelection.available change as source-incompatible; the same unreleased reservation is corrected to minor 0.7.0 before integration artifacts. Confirmed shared development merge at 76ed1bffe49769965a7ced6471aa884437e1437e via PR76 on 2026-10-25T13:21:55Z, pinned to independently reviewed and native/hosted-qualified head 0d06470 with identical trees. T088 moves to test without a second version application. Main delivery and publication remain separate and unverified. T089 joins this applied 0.7.0 target on 2026-10-25 as a patch member. No second bump, integration, or publication is inferred."    }
+      "evidence": "User-authorized configured-provider selection correction on 2026-10-25. Public development-latest manifest reports 0.6.0 at 89156f697350f4baf77de9dfb6d5838dc77272fd. Peer runtime status refuses an uninitialized board; existing worktrees and ownership are preserved, following the established single-author ledger reservation fallback. Fresh minor 0.7.0 is reserved here and applied once by t088-model-picker to native mirrors at development start. No integration, main delivery or publication inferred. Independent review identified the publicly exported ModelSelection.available change as source-incompatible; the same unreleased reservation is corrected to minor 0.7.0 before integration artifacts. Confirmed shared development merge at 76ed1bffe49769965a7ced6471aa884437e1437e via PR76 on 2026-10-25T13:21:55Z, pinned to independently reviewed and native/hosted-qualified head 0d06470 with identical trees. T088 moves to test without a second version application. Main delivery and publication remain separate and unverified. T089 joins this applied 0.7.0 target on 2026-10-25 as a patch member. Confirmed shared development merge at f2f0544e18cce06bf9ec7af6d2b2b62e6cffd715 via PR77 on 2026-10-25T17:07:25Z, pinned to reviewed head e3b74ad0dd1c57bd4b33f80a523cf10e0bbd7a2c. T089 moves to test without a second bump. Main delivery and publication remain separate. Publication reconciliation on 2026-10-25: development 0.7.0 was already published at 76ed1bffe49769965a7ced6471aa884437e1437e (successful artifact run 40197272966, completed 13:36:04Z), and at 0677c56adf1eb60edae8f160dd4b9d5d430caffe (successful artifact run 40198975880, completed 14:00:03Z), before PR77 merged T089 at 17:07:25Z. Therefore the prior statement that an applied-but-unreleased target remained available for T089 at integration was stale: that late join crossed the published-version boundary and is not retroactively approved by this record. The later successful artifact run 40214934850 completed 17:22:47Z, and the public development-latest manifest now binds 0.7.0 to f2f0544e18cce06bf9ec7af6d2b2b62e6cffd715, which includes T088 and T089. Retain that actual published membership and close the reservation; no new runtime version is invented for this documentation-only correction. Future runtime changes require a fresh reservation. Main delivery and production publication remain separate."
+    }
   ]
 }

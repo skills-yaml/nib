@@ -1,9 +1,9 @@
 # FT-022: Provider Prompt Caching
 
-**Status:** Development. Started on 2026-10-22 under a user-requested multi-agent goal;
-the user delegated the open decisions to the agent ("you pick").
+**Status:** Test. Started on 2026-10-22 under the user-requested goal; integrated
+into shared development on 2026-10-25 via PR72 (f8e30c0).
 
-State: development
+State: test
 Primary Feature: prompt-caching
 
 ## Summary
@@ -411,6 +411,26 @@ implementation begins. Model minimums, retention, and prices are provider-specif
 
 ## Memory Impact
 
-Status: pending
-Rationale: The decisions recorded above are durable; they are written to project
-memory when this spec is verified.
+Status: updated
+Rationale: The agent-picked defaults (Anthropic and OpenAI-compatible first, short
+retention on by default, extended opt-in, `off`, shared cache usage fields)
+are recorded in [workspace/agents/memory/decisions.md](../../../agents/memory/decisions.md)
+and [workspace/agents/memory/changelog.md](../../../agents/memory/changelog.md).
+Live savings measurement stays open because paid calls are not authorized.
+
+## Integration Evidence
+
+Revision: f8e30c0658932d87cfefc5305d82a9b44c13f3db
+Outcome: passed
+
+Merged into shared development on 2026-10-25 via PR72, pinned to head
+d13711e after full local `task verify`
+(NIB_REQUIRE_BWRAP_TESTS=1), the interactive release smoke and Linux/macOS CI.
+The reviewed head was 7b2d223. The
+later commits merge development (dropping `update_model_for_active`, which
+T087 removed as unused) and route `test:prompt-caching` through T087's
+focused-test guard; the full gates and CI reran on d13711e.
+An independent read-only review of those post-review changes on 2026-10-25
+found no correctness bugs.
+The merged tree equals the verified head. Main delivery and publication remain
+separate.
