@@ -52,7 +52,7 @@ new work requires verified main merge. See [SDLC](../instructions/tech/sdlc.md).
 | [T071](test/llm-providers/T071_two_generation_model_catalog.md) | llm-providers | test | Confirmed shared development integration 81c37a1908ec1032809e97cdf0b0b39d5253603b on 2026-10-08T17:02:18Z after independent exact review and fresh full native gates; shared minor 0.4.0 with T080; T073 supersedes earlier retention contracts; main delivery and publication separate. |
 | [T070](test/llm-providers/T070_three_generation_model_catalog.md) | llm-providers | test | Confirmed shared development integration 81c37a1908ec1032809e97cdf0b0b39d5253603b on 2026-10-08T17:02:18Z after independent exact review and fresh full native gates; shared minor 0.4.0 with T080; T073 supersedes earlier retention contracts; main delivery and publication separate. |
 | [T069](test/llm-providers/T069_current_model_catalog_refresh.md) | llm-providers | test | Confirmed shared development integration 81c37a1908ec1032809e97cdf0b0b39d5253603b on 2026-10-08T17:02:18Z after independent exact review and fresh full native gates; shared minor 0.4.0 with T080; T073 supersedes earlier retention contracts; main delivery and publication separate. |
-| [T023](development/llm-providers/T023_live_llm_provider_model_integration_qualification.md) | llm-providers | development | Live provider qualification incomplete; no paid calls made by this migration. |
+| [T023](development/llm-providers/T023_live_llm_provider_model_integration_qualification.md) | llm-providers | development | Live qualification incomplete; 2026-10-26 readiness audit reconciles current protected environments and remaining budget/timeout/evidence gaps; no paid calls made. |
 | [T068](done/llm-providers/T068_anthropic_stream_continuation_preservation.md) | llm-providers | done | Verified same-revision development/main delivery at 9762df5c10727889adff072045fcd8a8c1369dff via PR49; independent exact review and required native/all-platform gates passed; acceptance, versions and memory reconciled; publication separate. |
 | [T062](done/workspace-governance/T062_workspace_docs_v7_upgrade.md) | workspace-governance | done | Verified main merge at 4b0245b9890bb15a4c99ff46ec7296d42bf9401f; independent exact review and required native/hosted qualification passed; acceptance, versions, catalog and memory reconciled; publication tracked separately. |
 | [T063](done/tools-sandbox/T063_isolated_read_only_git_status.md) | tools-sandbox | done | Verified main merge at 4b0245b9890bb15a4c99ff46ec7296d42bf9401f; independent exact review and required native/hosted qualification passed; acceptance, versions, catalog and memory reconciled; publication tracked separately. |
@@ -129,6 +129,7 @@ new work requires verified main merge. See [SDLC](../instructions/tech/sdlc.md).
 | [D001](done/workspace-governance/D001_workspace_docs_adoption_and_foundational_spec_alignment.md) | workspace-governance | done | Preserved historical done under the prior 1.2.0 completion contract; no v7 main-merge event inferred. |
 | [T065](done/workspace-governance/T065_preserve_workspace_checkout_bytes.md) | workspace-governance | done | Verified main merge at 4b0245b9890bb15a4c99ff46ec7296d42bf9401f; independent exact review and required native/hosted qualification passed; acceptance, versions, catalog and memory reconciled; publication tracked separately. |
 | [T066](done/build-quality/T066_scoped_delegation_failure_fixture.md) | build-quality | done | Verified main merge at 4b0245b9890bb15a4c99ff46ec7296d42bf9401f; independent exact review and required native/hosted qualification passed; acceptance, versions, catalog and memory reconciled; publication tracked separately. |
+| [T090](development/agent-runtime/T090_tool_history_and_status_recovery.md) | agent-runtime | development | Implementation authorized 2026-10-26; cumulative history, bounded recovery and verification applicability; fresh patch 0.7.1 applied, acceptance and shared integration pending. |
 <!-- SPEC-CATALOG:END -->
 
 ## Version and Memory Impact
@@ -154,7 +155,7 @@ and Linux/macOS/Windows CI 37419726793 passed on that exact revision. Question
 forms, conversational recovery, Esc interruption and proposal chat are delivered;
 `/plan` and `/questions` are removed from interactive commands. See
 [T061](done/interactive/T061_question_form.md) for criterion evidence and actual events.
-Current catalog: **78 done, 17 test, 1 development, and 0 backlog**. Publication is separate.
+Current catalog: **78 done, 17 test, 2 development, and 0 backlog**. Publication is separate.
 
 The 2026-07-15 audit inspected all 27 specs that had claimed completion. Unsupported
 claims moved through `development/`; missing feasible behavior was implemented and

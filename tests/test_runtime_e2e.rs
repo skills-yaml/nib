@@ -847,6 +847,27 @@ async fn run_failure_fixture_with_approver(
     max_steps: u32,
     approval_handler: Option<Arc<dyn ApprovalHandler>>,
 ) -> (AgentRunSummary, Session, Vec<Value>, Vec<StreamEvent>) {
+    run_failure_fixture_with_goal(
+        root,
+        responses,
+        question_handler,
+        verification_obligations,
+        max_steps,
+        approval_handler,
+        "resourceful failure fixture",
+    )
+    .await
+}
+
+async fn run_failure_fixture_with_goal(
+    root: &Path,
+    responses: Vec<Value>,
+    question_handler: Option<Arc<dyn QuestionHandler>>,
+    verification_obligations: Vec<VerificationObligation>,
+    max_steps: u32,
+    approval_handler: Option<Arc<dyn ApprovalHandler>>,
+    goal: &str,
+) -> (AgentRunSummary, Session, Vec<Value>, Vec<StreamEvent>) {
     let (base_url, request_rx) = serve_responses_sequence(responses);
     let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel(128);
     let stream_collector = tokio::spawn(async move {
@@ -877,7 +898,6 @@ async fn run_failure_fixture_with_approver(
     save_nib_config_full(root, &mut config).expect("failure fixture config");
     let store = SessionStore::for_project(root).expect("failure fixture store");
     let mut session = store.create_session_with_id("resourceful-failure-fixture");
-    let goal = "resourceful failure fixture";
     let mut plan = Plan::new(
         goal,
         vec![PlanStep {
@@ -4917,7 +4937,13 @@ async fn task_listing_without_affected_paths_executes_in_the_session_worktree() 
 
 #[tokio::test]
 async fn missing_terminal_scopes_reconcile_with_actionable_recovery() {
-    for affected_paths in [None, Some(json!([]))] {
+    for affected_paths in [
+        None,
+        Some(json!([])),
+        Some(json!(42)),
+        Some(json!([1])),
+        Some(json!([" "])),
+    ] {
         let root = git_repository();
         let mut arguments = json!({"command": "task verify", "cwd": "."});
         if let Some(paths) = affected_paths {
@@ -4925,16 +4951,24 @@ async fn missing_terminal_scopes_reconcile_with_actionable_recovery() {
         }
         let (summary, persisted, requests) = run_failure_fixture(
             root.path(),
-            vec![failure_fixture_tool_turn(
-                "missing-terminal-scope",
-                vec![("run_terminal", arguments)],
-            )],
+            (0..3)
+                .map(|index| {
+                    failure_fixture_tool_turn(
+                        &format!("missing-terminal-scope-{index}"),
+                        vec![("run_terminal", arguments.clone())],
+                    )
+                })
+                .collect(),
             None,
         )
         .await;
         assert_eq!(summary.outcome, "tool_scope_required");
         assert_eq!(summary.tool_call_count, 0);
-        assert_eq!(requests.len(), 1);
+        assert_eq!(requests.len(), 3);
+        assert!(!persisted
+            .events
+            .iter()
+            .any(|event| event.kind == "approval_required"));
         assert_eq!(persisted.plan.as_ref().unwrap().steps[0].status, "Blocked");
         assert!(persisted
             .events
@@ -5059,4 +5093,190 @@ async fn progressive_skill_activation_and_resource_read_are_audited_end_to_end()
         .tool_calls
         .iter()
         .all(|call| call.result.as_ref().unwrap()["success"] == true));
+}
+
+#[tokio::test]
+async fn t090_missing_scope_repairs_once_without_replaying_successful_reads() {
+    let root = git_repository();
+    let mut turns = Vec::new();
+    for repair in 0..3 {
+        let command = format!("printf repaired-{repair}");
+        let mut calls = vec![(
+            "run_terminal",
+            json!({"command":command, "affected_paths":[]}),
+        )];
+        if repair == 0 {
+            calls.insert(0, ("git_status", json!({})));
+        }
+        turns.push(failure_fixture_tool_turn(
+            &format!("missing-{repair}"),
+            calls,
+        ));
+        turns.push(failure_fixture_tool_turn(
+            &format!("fixed-{repair}"),
+            vec![(
+                "run_terminal",
+                json!({"command":command, "cwd":".", "affected_paths":["."]}),
+            )],
+        ));
+    }
+    turns.push(failure_fixture_text_turn());
+    let (summary, session, requests) = run_failure_fixture(root.path(), turns, None).await;
+    assert_eq!(summary.outcome, "completed");
+    assert_eq!(
+        session
+            .tool_calls
+            .iter()
+            .filter(|call| call.tool_name.as_deref() == Some("git_status"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        session
+            .tool_calls
+            .iter()
+            .filter(|call| call.tool_name.as_deref() == Some("run_terminal"))
+            .count(),
+        3
+    );
+    assert_eq!(
+        session
+            .events
+            .iter()
+            .filter(|event| event.kind == "tool_scope_repair")
+            .count(),
+        3
+    );
+    assert_eq!(
+        session
+            .events
+            .iter()
+            .filter(|event| event.kind == "approval_required")
+            .count(),
+        0
+    );
+    assert!(requests[1].to_string().contains("affected_paths"));
+}
+
+#[tokio::test]
+async fn t090_successful_repetition_gets_one_correction_then_partial_findings() {
+    let root = git_repository();
+    let (summary, session, requests) = run_failure_fixture(
+        root.path(),
+        (0..4)
+            .map(|index| {
+                failure_fixture_tool_turn(
+                    &format!("repeat-{index}"),
+                    vec![("git_status", json!({}))],
+                )
+            })
+            .collect(),
+        None,
+    )
+    .await;
+    assert_eq!(summary.outcome, "repeated_tool_no_progress");
+    assert_eq!(requests.len(), 4);
+    assert!(requests[3]["input"][0]["content"]
+        .as_str()
+        .unwrap()
+        .contains("Repeated successful tool calls"));
+    assert_eq!(
+        session
+            .events
+            .iter()
+            .filter(|event| event.kind == "tool_progress_correction")
+            .count(),
+        1
+    );
+    assert!(summary.last_message.unwrap().contains("git_status"));
+}
+
+#[tokio::test]
+async fn t090_report_scope_rejects_mutation_even_when_the_model_claims_read_only() {
+    let root = git_repository();
+    let (summary, session, _, events)=run_failure_fixture_with_goal(root.path(),vec![
+        failure_fixture_tool_turn("write",vec![("apply_patch",json!({"patch":"*** Begin Patch\n*** Add File: surprise.txt\n+changed\n*** End Patch"}))]),
+    ],None,Vec::new(),16,None,"repo status").await;
+    assert_eq!(summary.outcome, "report_scope_conflict");
+    assert!(session.tool_calls.is_empty());
+    assert!(!root.path().join("surprise.txt").exists());
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, StreamEvent::ApprovalRequired { .. })));
+}
+
+#[tokio::test]
+async fn t090_report_keeps_skill_history_repairs_scope_and_omits_implementation_gates() {
+    let root = git_repository();
+    std::fs::write(
+        root.path().join("AGENTS.md"),
+        "# Development workflow\nAfter code changes run `task verify` before completion.\n",
+    )
+    .unwrap();
+    let skill = root.path().join(".nib/skills/status-proof");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(skill.join("SKILL.md"),"---\nname: status-proof\ndescription: Inspect repository status\n---\nSTATUS_PROOF_ACTIVE_INSTRUCTIONS: Report findings without changing the repository.\n").unwrap();
+    let command = "git status --short --branch && git worktree list";
+    let (summary, session, requests, _) = run_failure_fixture_with_goal(
+        root.path(),
+        vec![
+            failure_fixture_tool_turn(
+                "skill",
+                vec![("load_skill", json!({"skill":"status-proof"}))],
+            ),
+            failure_fixture_tool_turn("status", vec![("git_status", json!({}))]),
+            failure_fixture_tool_turn(
+                "scope",
+                vec![(
+                    "run_terminal",
+                    json!({"command":command,"affected_paths":[]}),
+                )],
+            ),
+            failure_fixture_tool_turn(
+                "repair",
+                vec![(
+                    "run_terminal",
+                    json!({"command":command,"affected_paths":["."]}),
+                )],
+            ),
+            answer_fixture_text_turn(
+                "Repository inspected; local changes remain. Remote status was not checked.",
+            ),
+        ],
+        None,
+        Vec::new(),
+        16,
+        None,
+        "repo status",
+    )
+    .await;
+    assert_eq!(summary.outcome, "completed");
+    assert_eq!(requests.len(), 5);
+    assert!(requests[1]["input"][0]["content"]
+        .as_str()
+        .unwrap()
+        .contains("STATUS_PROOF_ACTIVE_INSTRUCTIONS"));
+    assert_eq!(
+        session
+            .tool_calls
+            .iter()
+            .filter(|call| call.tool_name.as_deref() == Some("load_skill"))
+            .count(),
+        1
+    );
+    assert!(session
+        .plan
+        .as_ref()
+        .unwrap()
+        .steps
+        .iter()
+        .all(|step| step.verification_obligations.is_empty()));
+    assert!(session
+        .tool_calls
+        .iter()
+        .all(|call| call.arguments["command"] != "task verify"));
+    let text = requests[4].to_string();
+    assert!(text.contains("STATUS_PROOF_ACTIVE_INSTRUCTIONS"));
+    assert!(text.contains("private-status-0"));
+    assert!(text.contains("private-repair-0"));
 }

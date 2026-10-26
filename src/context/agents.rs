@@ -577,9 +577,16 @@ pub fn tool_instruction_scopes(
         }
         "run_terminal" => {
             let mut paths = vec![declared("cwd").unwrap_or_else(|| project_root.to_path_buf())];
-            let affected = arguments.get("affected_paths").and_then(Value::as_array);
+            let affected = match arguments.get("affected_paths") {
+                Some(value) => Some(value.as_array().ok_or(TERMINAL_SCOPE_EMPTY_ERROR)?),
+                None => None,
+            };
             if let Some(affected) = affected {
-                if affected.is_empty() {
+                if affected.is_empty()
+                    || affected
+                        .iter()
+                        .any(|path| path.as_str().is_none_or(|path| path.trim().is_empty()))
+                {
                     return Err(TERMINAL_SCOPE_EMPTY_ERROR.to_string());
                 }
                 paths.extend(

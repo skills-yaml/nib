@@ -1653,7 +1653,12 @@ fn instruction_context_missing_reloads_with_the_recovery_reason() {
 
 #[test]
 fn blocked_and_repeated_tool_outcomes_reload_as_failures() {
-    for outcome in ["blocked_step_unresolved", "repeated_tool_failure"] {
+    for outcome in [
+        "blocked_step_unresolved",
+        "repeated_tool_failure",
+        "repeated_tool_no_progress",
+        "report_scope_conflict",
+    ] {
         for kind in ["reconciliation", "run_terminal"] {
             let activity = project_session_event(
                 &SessionEvent {
@@ -1668,6 +1673,18 @@ fn blocked_and_repeated_tool_outcomes_reload_as_failures() {
             assert_eq!(activity.kind, ActivityKind::Failure);
             assert_eq!(activity.title, terminal_outcome_message(outcome).title);
             assert!(!activity.body.is_empty());
+            let mut live = Vec::new();
+            apply_stream_event(
+                &mut live,
+                StreamEvent::Reconciled {
+                    outcome: outcome.to_string(),
+                },
+                &mut None,
+                &[],
+            );
+            assert_eq!(live[0].kind, activity.kind);
+            assert_eq!(live[0].title, activity.title);
+            assert_eq!(live[0].body, activity.body);
         }
     }
 }

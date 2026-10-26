@@ -20,7 +20,7 @@ const CHAT_TRANSPORT: &str = "chat_completions";
 const CHAT_REASONING_TOOL_GUIDANCE: &str = " Configure this provider with api = \"responses\", or set reasoning_effort = \"none\" if the model supports Chat tool calls without reasoning.";
 
 struct ChatTurnState {
-    assistant_message: Value,
+    messages: Vec<Value>,
     calls: Vec<(ToolInvocationId, ProviderCallId)>,
 }
 
@@ -30,6 +30,7 @@ fn chat_continuation(
     scope: Option<LlmRequestScope>,
     assistant_message: Value,
     calls: &[ToolCallRequest],
+    mut history: Vec<Value>,
 ) -> Result<ProviderContinuation, String> {
     let calls = calls
         .iter()
@@ -47,7 +48,8 @@ fn chat_continuation(
     if unique.len() != calls.len() {
         return Err("Chat continuation contains duplicate provider call IDs".to_string());
     }
-    let encoded_bytes = serde_json::to_vec(&assistant_message)
+    history.push(assistant_message);
+    let encoded_bytes = serde_json::to_vec(&history)
         .map_err(|error| format!("failed to measure Chat continuation: {error}"))?
         .len();
     ProviderContinuation::new(
@@ -59,10 +61,10 @@ fn chat_continuation(
             .iter()
             .map(|(invocation_id, _)| *invocation_id)
             .collect(),
-        1,
+        history.len(),
         encoded_bytes,
         ChatTurnState {
-            assistant_message,
+            messages: history,
             calls,
         },
     )
@@ -76,7 +78,7 @@ fn into_chat_messages(
 ) -> Result<Vec<Value>, String> {
     let (state, outputs): (ChatTurnState, BTreeMap<ToolInvocationId, ToolResult>) =
         continuation.consume(provider, model, CHAT_TRANSPORT, scope)?;
-    let mut messages = vec![state.assistant_message];
+    let mut messages = state.messages;
     for (invocation_id, call_id) in state.calls {
         let output = outputs
             .get(&invocation_id)
@@ -87,6 +89,7 @@ fn into_chat_messages(
             "content": output.encoded_output(),
         }));
     }
+    super::types::validate_native_history(&messages)?;
     Ok(messages)
 }
 
@@ -612,7 +615,7 @@ fn chat_assistant_message(
 
 fn attach_chat_continuation(
     response: &mut LlmResponse,
-    _data: &Value,
+    history: Vec<Value>,
     provider: &str,
     model: &str,
     scope: Option<LlmRequestScope>,
@@ -631,6 +634,7 @@ fn attach_chat_continuation(
         scope,
         assistant_message,
         calls,
+        history,
     )?);
     Ok(())
 }
@@ -678,12 +682,20 @@ impl LlmClient for OpenAiCompatClient {
         )
         .map_err(|error| self.rejected_request(&error))?;
         let requests_tools_with_reasoning = self.requests_tools_with_reasoning(&request);
+        let base_count = request.messages.len();
         let scope = request.scope.clone();
         let body = self
             .request_body(request, false)
             .map_err(|error| self.rejected_request(&error))?;
         let url = self.endpoint();
 
+        let history = body["messages"]
+            .as_array()
+            .expect("encoded messages")
+            .iter()
+            .skip(base_count)
+            .cloned()
+            .collect::<Vec<_>>();
         let retry_capabilities = crate::llm::registry::retry_capabilities(
             &self.provider,
             crate::llm::registry::ProviderTransport::ChatCompletions,
@@ -737,7 +749,7 @@ impl LlmClient for OpenAiCompatClient {
             )
             .with_retry_attempts(retry_attempts)
         })?;
-        attach_chat_continuation(&mut response, &data, &self.provider, &self.model, scope)
+        attach_chat_continuation(&mut response, history, &self.provider, &self.model, scope)
             .map_err(|error| {
                 self.protocol_error("protocol failure", &error)
                     .with_retry_attempts(retry_attempts)
@@ -755,12 +767,20 @@ impl LlmClient for OpenAiCompatClient {
         )
         .map_err(|error| self.rejected_request(&error))?;
         let requests_tools_with_reasoning = self.requests_tools_with_reasoning(&request);
+        let base_count = request.messages.len();
         let scope = request.scope.clone();
         let body = self
             .request_body(request, true)
             .map_err(|error| self.rejected_request(&error))?;
         let url = self.endpoint();
 
+        let history = body["messages"]
+            .as_array()
+            .expect("encoded messages")
+            .iter()
+            .skip(base_count)
+            .cloned()
+            .collect::<Vec<_>>();
         let retry_capabilities = crate::llm::registry::retry_capabilities(
             &self.provider,
             crate::llm::registry::ProviderTransport::ChatCompletions,
@@ -1139,6 +1159,7 @@ impl LlmClient for OpenAiCompatClient {
                                                     continuation_scope.clone(),
                                                     assistant_message,
                                                     &calls,
+                                                    history.clone(),
                                                 ) {
                                                     Ok(continuation) => Some(continuation),
                                                     Err(error) => {

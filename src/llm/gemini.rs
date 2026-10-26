@@ -17,15 +17,16 @@ use super::{LlmClient, LlmStream};
 const GEMINI_TRANSPORT: &str = "gemini_generate_content";
 
 struct GeminiTurnState {
-    model_content: Value,
+    contents: Vec<Value>,
     calls: Vec<(ToolInvocationId, String)>,
 }
 
-fn gemini_continuation(
+fn gemini_continuation_with_history(
     model: &str,
     scope: Option<LlmRequestScope>,
     model_content: Value,
     calls: &[ToolCallRequest],
+    mut history: Vec<Value>,
 ) -> Result<ProviderContinuation, String> {
     let retained_function_parts = model_content
         .get("parts")
@@ -67,7 +68,8 @@ fn gemini_continuation(
         .iter()
         .map(|call| (call.invocation_id, call.name.clone()))
         .collect::<Vec<_>>();
-    let encoded_bytes = serde_json::to_vec(&model_content)
+    history.push(model_content);
+    let encoded_bytes = serde_json::to_vec(&history)
         .map_err(|error| format!("failed to measure Gemini continuation: {error}"))?
         .len();
     ProviderContinuation::new_ordered(
@@ -79,13 +81,23 @@ fn gemini_continuation(
             .iter()
             .map(|(invocation_id, _)| *invocation_id)
             .collect(),
-        1,
+        history.len(),
         encoded_bytes,
         GeminiTurnState {
-            model_content,
+            contents: history,
             calls,
         },
     )
+}
+
+#[cfg(test)]
+fn gemini_continuation(
+    model: &str,
+    scope: Option<LlmRequestScope>,
+    content: Value,
+    calls: &[ToolCallRequest],
+) -> Result<ProviderContinuation, String> {
+    gemini_continuation_with_history(model, scope, content, calls, Vec::new())
 }
 
 fn into_gemini_contents(
@@ -111,10 +123,10 @@ fn into_gemini_contents(
             }
         }));
     }
-    Ok(vec![
-        state.model_content,
-        json!({"role": "user", "parts": parts}),
-    ])
+    let mut contents = state.contents;
+    contents.push(json!({"role": "user", "parts": parts}));
+    super::types::validate_native_history(&contents)?;
+    Ok(contents)
 }
 
 pub struct GeminiClient {
@@ -261,10 +273,18 @@ impl LlmClient for GeminiClient {
         )
         .map_err(|error| self.request_error(error))?;
         validate_gemini_request(&request).map_err(|error| self.request_error(error))?;
+        let base_count = gemini_contents(request.messages).len();
         let scope = request.scope.clone();
         let body = self
             .request_body(request)
             .map_err(|error| self.request_error(error))?;
+        let history = body["contents"]
+            .as_array()
+            .expect("encoded contents")
+            .iter()
+            .skip(base_count)
+            .cloned()
+            .collect::<Vec<_>>();
         let retry_capabilities = crate::llm::registry::retry_capabilities(
             "google",
             crate::llm::registry::ProviderTransport::GeminiGenerateContent,
@@ -337,10 +357,11 @@ impl LlmClient for GeminiClient {
                         .with_retry_attempts(retry_attempts)
                 })?;
             completed.continuation = Some(
-                gemini_continuation(&self.model, scope, model_content, calls).map_err(|error| {
-                    self.protocol_error(error)
-                        .with_retry_attempts(retry_attempts)
-                })?,
+                gemini_continuation_with_history(&self.model, scope, model_content, calls, history)
+                    .map_err(|error| {
+                        self.protocol_error(error)
+                            .with_retry_attempts(retry_attempts)
+                    })?,
             );
         }
         completed.attempts = retry_attempts;
@@ -356,10 +377,18 @@ impl LlmClient for GeminiClient {
         )
         .map_err(|error| self.request_error(error))?;
         validate_gemini_request(&request).map_err(|error| self.request_error(error))?;
+        let base_count = gemini_contents(request.messages).len();
         let continuation_scope = request.scope.clone();
         let body = self
             .request_body(request)
             .map_err(|error| self.request_error(error))?;
+        let history = body["contents"]
+            .as_array()
+            .expect("encoded contents")
+            .iter()
+            .skip(base_count)
+            .cloned()
+            .collect::<Vec<_>>();
         let retry_capabilities = crate::llm::registry::retry_capabilities(
             "google",
             crate::llm::registry::ProviderTransport::GeminiGenerateContent,
@@ -552,7 +581,7 @@ impl LlmClient for GeminiClient {
                                 tool_calls,
                                 reason,
                                 &model,
-                                continuation_scope,
+                                (continuation_scope, history),
                                 retained_parts,
                                 usage,
                             ) {
@@ -805,7 +834,7 @@ fn complete_gemini_stream(
     tool_calls: crate::llm::ToolCallAccumulator,
     finish_reason: LlmFinishReason,
     model: &str,
-    scope: Option<LlmRequestScope>,
+    context: (Option<LlmRequestScope>, Vec<Value>),
     retained_parts: Vec<Value>,
     usage: Option<LlmUsage>,
 ) -> Result<LlmResponse, String> {
@@ -815,11 +844,12 @@ fn complete_gemini_stream(
     let continuation = if tool_calls.is_empty() {
         None
     } else {
-        Some(gemini_continuation(
+        Some(gemini_continuation_with_history(
             model,
-            scope,
+            context.0,
             json!({"role": "model", "parts": retained_parts}),
             &tool_calls,
+            context.1,
         )?)
     };
     Ok(LlmResponse {

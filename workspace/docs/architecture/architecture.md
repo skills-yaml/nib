@@ -244,8 +244,11 @@ classified safe and retain terminal worktree and sandbox/approval boundaries.
 When bwrap masks HOME, nib mounts only the PATH-selected Task executable as a
 read-only file so a home installation remains usable without exposing sibling files.
 Other Task commands require declared affected paths. Missing or empty terminal
-scopes reconcile as `tool_scope_required` with `affected_paths` recovery guidance,
-separately from instruction-loading failures. Incomplete, linked,
+scopes receive `affected_paths` recovery guidance before approval or execution.
+Up to two corrected proposals retain the active plan; independent valid reads are
+not replayed. Exhausted repairs reconcile as `tool_scope_required`, separately
+from instruction-loading failures. Unsafe paths and denied approvals remain
+fail-closed. Incomplete, linked,
 oversized, unreadable, or prompt-incompatible required instructions block dependent
 execution. Ordinary files, tool observations, remembered facts, and summaries supply
 evidence; they do not grant permission or replace the current user request.
@@ -266,6 +269,24 @@ allocation, requests a bounded continuation summary, and retains the raw audit t
 The summary prioritizes intent, constraints, decisions, unanswered questions, failed
 approaches, verification evidence, and remaining work. Active provider continuations
 retain their separate bounded transport state and defer automatic compression.
+Chat Completions and Gemini retain cumulative native exchanges like Responses and
+Anthropic. Runtime refreshes skill and plan context without replacing the original
+public conversation prefix. Continuation admission conservatively includes JSON
+escaping, repeated native identifiers and result envelopes; actual replay also
+obeys fixed byte/item limits. Private native state remains adapter-owned.
+
+Successful identical batches repeated three times, or an unchanged two-batch
+cycle repeated three times, receive one corrective prompt. Another unchanged cycle
+stops with `repeated_tool_no_progress` and bounded partial findings. Evidence,
+plan-step progress, human steering and declared polling break the cycle. Missing
+scope repair never triggers model escalation.
+
+Exact read-only status requests exclude implementation-only verification gates.
+Explicit human commands and project gates applying to reports remain obligations;
+ambiguous applicability requires clarification. A potentially mutating proposal
+under report-only scope stops with `report_scope_conflict`. Model labels cannot
+waive obligations. Quoted examples and negated commands supply no execution authority.
+
 Each agent run also persists bounded `agent_resource_usage` evidence: logical
 generation requests, executable tool attempts, estimated input-token totals and
 maximum, compression requests, and repeated questions. The estimate uses the same
