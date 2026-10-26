@@ -150,7 +150,7 @@ binary to resume/review these sessions. Existing outcomes and saved sessions kee
 their meanings. No private native continuation is persisted. This is a compatible
 patch, with no migration or rewritten historical evidence.
 
-## Affected Areas and Delivery Order
+## Implementation Plan and Affected Areas
 
 1. Provider codecs (`src/llm/{openai,responses,gemini,anthropic}.rs`), continuation
    types and adapter fixtures; context snapshot/budget consumers.
