@@ -955,3 +955,60 @@ publication boundary in facts.md. Resolved T089's stale pending memory status.
 The ledger retains observed T088/T089 publication membership as released while
 explicitly superseding the stale open-reservation assumption; future runtime
 changes need a fresh target. No runtime source or native version changed.
+
+## 2026-10-25 - T090 status workflow recovery specification
+
+- Type: decision
+- Source: user-requested specification and source/session-audit investigation
+- Confidence: high
+- Review: independent contract review required before handoff
+- Supersedes: none
+
+Content:
+
+T090 in backlog scopes cumulative provider tool history, bounded detection of
+successful repetition, repair of missing terminal scope before approval, and
+task-appropriate verification. Preserve private provider state, fail-closed
+permissions and implementation quality gates. The empty-queue initiating input
+remains unverified, and active-run model switching is outside this fix. Runtime
+implementation and a fresh release reservation remain pending; published 0.7.0
+membership cannot authorize this follow-up.
+
+## 2026-10-26 - T090 implementation and T023 qualification boundary
+
+- Type: decision
+- Source: user-authorized T090 implementation and T023 read-only readiness audit
+- Confidence: high
+- Review: independent implementation review and native gates required for delivery
+- Supersedes: T090 specification-only backlog status on 2026-10-25
+
+Content:
+
+T090 is active development under fresh patch 0.7.1 (nib-status-recovery).
+Provider-native history stays private and cumulative; scope repairs precede
+approval, and successful repetition has its own bounded correction. Reporting
+scope cannot be claimed by a model to waive implementation gates.
+T023 remains a separate live qualification task. Its historical Anthropic failure
+used only one tool batch, so T090's third-request history loss does not explain it.
+Secret-name presence and configured budgets do not establish spend authority;
+paid qualification requires the protected approvals and retained exact-revision
+reports. No paid provider requests were made by this work.
+
+## 2026-10-26 - T090 status recovery integrated for testing
+
+- Type: fact
+- Source: PR #78 and hosted qualification run 40309841661
+- Confidence: high
+- Review: independent exact-candidate runtime/security and adapter/spec reviews
+- Supersedes: none
+
+Content:
+
+T090's tool-history and status-recovery implementation is integrated into shared
+development at ea889ae through PR #78, using patch 0.7.1 without a second bump.
+Its spec is in test; main delivery remains unverified. Initial development
+publication 0.7.1 is confirmed at ea889ae by manifest and successful artifact run
+40315639494; later runtime work requires a fresh version. All supported network
+adapter configurations have offline multi-round complete/streaming coverage.
+T023 remains in development because its separate live-provider qualification is
+incomplete; no paid provider calls were made by this implementation.

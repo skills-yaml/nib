@@ -1360,6 +1360,8 @@ pub(crate) fn is_agent_failure_outcome(outcome: &str) -> bool {
                 | "empty_model_response"
                 | "tool_execution_failed"
                 | "repeated_tool_failure"
+                | "repeated_tool_no_progress"
+                | "report_scope_conflict"
                 | "blocked_step_unresolved"
                 | "required_verification_unresolved"
                 | "transition_limit_reached"

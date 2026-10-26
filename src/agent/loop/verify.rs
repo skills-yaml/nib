@@ -126,30 +126,7 @@ pub(crate) fn command_verification_obligation(
 }
 
 pub(crate) fn explicit_human_verification_commands(goal: &str) -> Vec<String> {
-    const KNOWN: &[&str] = &[
-        "task verify",
-        "task check",
-        "task test",
-        "cargo test",
-        "cargo check",
-        "cargo clippy",
-    ];
-    let mut exact_segments = goal
-        .split('`')
-        .enumerate()
-        .filter(|(index, _)| index % 2 == 1)
-        .map(|(_, segment)| segment.trim().to_ascii_lowercase())
-        .collect::<Vec<_>>();
-    exact_segments.extend(goal.lines().filter_map(|line| {
-        line.trim()
-            .strip_prefix("$ ")
-            .map(|command| command.trim().to_ascii_lowercase())
-    }));
-    KNOWN
-        .iter()
-        .filter(|command| exact_segments.iter().any(|segment| segment == **command))
-        .map(|command| (*command).to_string())
-        .collect()
+    human_verification_commands(goal)
 }
 
 pub(crate) fn add_independent_verification_requirements(
@@ -160,6 +137,11 @@ pub(crate) fn add_independent_verification_requirements(
 ) -> Result<Vec<String>, String> {
     if plan.steps.is_empty() {
         return Ok(Vec::new());
+    }
+    if project_verification_applicability(goal, project_instructions)
+        == VerificationApplicability::Ambiguous
+    {
+        return Err("Clarification required: project instructions conflict or do not establish whether task verify applies to the requested work. No verification requirement was waived.".to_string());
     }
     let step_index = plan.steps.len() - 1;
     let mut candidates = explicit_human_verification_commands(goal)
@@ -172,10 +154,7 @@ pub(crate) fn add_independent_verification_requirements(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
-    if project_instructions
-        .to_ascii_lowercase()
-        .contains("task verify")
-    {
+    if project_verify_applies(goal, project_instructions) {
         candidates.push(command_verification_obligation(
             "task verify",
             VerificationAuthority::Project,
@@ -224,11 +203,13 @@ pub(crate) fn derive_active_plan_verification_requirements(
                 source_message_index,
             )
             .map_err(crate::session::SessionError::InvalidMutation)?;
-            if !added.is_empty() {
+            {
                 append_session_event(
                     session,
                     "verification_requirements_derived",
-                    json!({"verification_ids": added, "source": "resolved_human_and_project_requirements"}),
+                    json!({"verification_ids": added, "source": "resolved_human_and_project_requirements",
+                        "report_only_request":report_only_request(goal),
+                        "project_verify_applicable":project_verify_applies(goal, project_instructions)}),
                 );
             }
             Ok(())

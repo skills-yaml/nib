@@ -328,7 +328,9 @@ pub(crate) fn is_failure_outcome(outcome: &str) -> bool {
         || outcome.contains("interrupted")
         || matches!(
             outcome,
-            "invalid_plan"
+            "report_scope_conflict"
+                | "repeated_tool_no_progress"
+                | "invalid_plan"
                 | "blocked_step_unresolved"
                 | "required_verification_unresolved"
                 | "turn_limit_reached"

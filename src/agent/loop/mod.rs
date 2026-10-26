@@ -39,10 +39,14 @@ mod escalation;
 mod finish;
 mod inner;
 mod question_forms;
+mod recovery;
 mod support;
 pub(crate) use discussion::*;
 pub(crate) use question_forms::*;
+use recovery::*;
+mod verification_scope;
 mod verify;
+use verification_scope::*;
 mod workspace_record;
 
 pub(crate) use entry::*;

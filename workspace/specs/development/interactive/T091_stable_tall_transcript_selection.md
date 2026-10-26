@@ -68,7 +68,7 @@ copy payload format changes.
 
 ## Implementation Plan
 
-1. Reserve patch 0.7.1 from published development 0.7.0 and apply it once.
+1. Reserve a fresh patch from the latest published development release and apply it once. Published 0.7.1 belongs to T090, so this fix uses 0.7.2.
 2. Stop `ensure_selected_visible` from alternating the ends of a block taller
    than the page, and cover that with a repeated-reveal regression.
 3. Describe the stable rule in the user guide.
@@ -91,7 +91,7 @@ with no persisted state to migrate.
 
 | Component | Impact | Release | Rationale |
 | --- | --- | --- | --- |
-| nib | patch | nib-tall-selection | Compatible viewport fix after published development 0.7.0; fresh 0.7.1 applied once at development start. |
+| nib | patch | nib-tall-selection | Compatible viewport fix. Published 0.7.1 is T090 and closed, so fresh 0.7.2 is applied once from that baseline before integration. |
 
 ## Memory Impact
 

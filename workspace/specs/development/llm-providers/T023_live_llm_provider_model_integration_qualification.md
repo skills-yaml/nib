@@ -1525,3 +1525,31 @@ unchanged. Canary still follows the registry default independently, so a future
 authorized canary uses the refreshed model after T069 delivery. Token ceilings,
 approvals and qualification criteria remain authoritative; public catalog
 inspection and offline fixtures establish no live-provider pass.
+
+## Read-Only Readiness Audit (2026-10-26)
+
+All six protected provider environments exist with reviewer gates and an
+`LLM_API_KEY` secret name. Secret presence does not establish validity, dedicated
+accounts or hard spend caps. The OpenRouter allowlist now has four approved exact
+IDs with review date 2026-09-25 and expiry 2027-03-25; the selected matrix expires
+2027-02-17. Earlier missing-secret/allowlist observations are historical.
+
+The configured ceilings are $50 per provider, 200 requests, 600 attempts,
+4096 output tokens per request, 250000 total tokens, concurrency one, 3600 seconds
+per provider and 14400 seconds per run. Unpriced models are allowed in current
+configuration; these settings do not themselves authorize spend. Meta lacks the
+explicit scenario-timeout variable present at 120 seconds in the other five
+environments. No environment settings were changed by this audit.
+
+Catalog run 39576764413 targets the older main revision; run 36703091993 remains
+waiting on protected environments. Review pending runs before dispatching new
+qualification. Historical Anthropic run 36190856434 no longer has retained
+artifacts. Its fixture had one tool batch and two requests, so T090's loss on the
+third request does not explain that historical failure. Canary currently uses
+`claude-opus-5-5`; selected qualification still uses `claude-opus-5`.
+
+Next: choose the reviewed candidate revision, resolve the missing timeout and
+pending-run ownership, establish approved account/spend limits, review catalog
+and offline budget planning, then authorize bounded canary/selected/full runs.
+The workflow has provider/mode inputs, not a separate dry-run mode. No provider
+calls or paid qualification were performed by this audit; live criteria remain open.

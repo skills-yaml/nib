@@ -24,6 +24,7 @@ fn chat_continuation_encodes_a_typed_tool_result() {
         Some(scope.clone()),
         assistant_message,
         std::slice::from_ref(&call),
+        Vec::new(),
     )
     .unwrap();
     continuation

@@ -697,7 +697,13 @@ impl ProviderContinuation {
     }
 
     pub(crate) fn encoded_bytes(&self) -> usize {
+        // Conservative wire bound: JSON tool outputs may be JSON-encoded again,
+        // and each result repeats its call ID/name from the retained native state.
+        // Doubling covers escaping and repeated identifiers; per-result framing
+        // covers the native result envelopes of every supported adapter.
         self.encoded_bytes
+            .saturating_mul(2)
+            .saturating_add(self.tool_results.len().saturating_mul(256))
     }
 
     pub(crate) fn unresolved_count(&self) -> usize {
@@ -1281,9 +1287,37 @@ impl ToolCallAccumulator {
     }
 }
 
+/// Check the actual encoded native replay, including string escaping/wrappers.
+/// Error text deliberately omits private content.
+pub(crate) fn validate_native_history(items: &[serde_json::Value]) -> Result<(), String> {
+    if items.len() > MAX_CONTINUATION_ITEMS {
+        return Err("provider continuation exceeds the item limit".to_string());
+    }
+    let bytes = serde_json::to_vec(items)
+        .map_err(|_| "cannot measure native history")?
+        .len();
+    if bytes > MAX_CONTINUATION_BYTES {
+        return Err("provider continuation exceeds the byte limit".to_string());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cumulative_native_history_bounds_reject_private_replay_without_leaking_it() {
+        let item = json!({"private": "opaque-history-sentinel"});
+        let item_error =
+            validate_native_history(&vec![item; MAX_CONTINUATION_ITEMS + 1]).unwrap_err();
+        assert!(item_error.contains("item limit"));
+        let segment = json!({"private": "opaque-history-sentinel".repeat(4096)});
+        assert!(validate_native_history(std::slice::from_ref(&segment)).is_ok());
+        let byte_error = validate_native_history(&vec![segment; 64]).unwrap_err();
+        assert!(byte_error.contains("byte limit"));
+        assert!(!format!("{item_error}{byte_error}").contains("opaque-history-sentinel"));
+    }
 
     #[test]
     fn compatible_tool_schema_preserves_property_names_and_default_values() {

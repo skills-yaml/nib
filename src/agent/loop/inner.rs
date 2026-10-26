@@ -471,6 +471,12 @@ pub(crate) async fn run_agent_loop_inner(
     let mut provider_continuation: Option<ProviderContinuation> = None;
     let mut verification_recovery: Option<Vec<String>> = None;
     let mut failed_tool_batches = FailedToolBatchGuard::default();
+    let mut successful_tool_batches = SuccessfulProgressGuard::default();
+    let mut scope_repair_attempts = 0usize;
+    let mut pending_scope_calls = std::collections::BTreeSet::new();
+    let mut progress_observations: std::collections::VecDeque<Value> =
+        std::collections::VecDeque::new();
+    let mut continuation_base: Option<Session> = None;
 
     store
         .record_event(
@@ -522,6 +528,9 @@ pub(crate) async fn run_agent_loop_inner(
                 record_steering_intake(&store, session_id, &run_id, channel_id, &steering)?;
                 append_steering_context(&mut context_sections, &steering);
                 failed_tool_batches.reset();
+                successful_tool_batches.reset();
+                pending_scope_calls.clear();
+                scope_repair_attempts = 0;
                 if provider_continuation.take().is_some() {
                     record_provider_continuation_lifecycle(
                         &store,
@@ -1166,6 +1175,56 @@ pub(crate) async fn run_agent_loop_inner(
                             takeover_turn = Some(reserved);
                         }
                     }
+                    if provider_continuation.is_some() {
+                        let current = store
+                            .load_result(session_id)
+                            .map_err(|error| error.to_string())?
+                            .ok_or("session disappeared during continuation refresh")?;
+                        let base = continuation_base
+                            .as_mut()
+                            .ok_or("continuation base is missing")?;
+                        refresh_continuation_base(base, &current);
+                        let current_step = current
+                            .plan
+                            .as_ref()
+                            .and_then(|plan| plan.steps.get(plan.current_step_index))
+                            .map(|step| format!("{}\nStatus: {}", step.description, step.status));
+                        let refreshed = build_bounded_runtime_input(RuntimePromptRequest {
+                            context: &context_sections,
+                            session: base,
+                            current_step: current_step.as_deref(),
+                            tools: tools_ref,
+                            mode: &cfg.mode,
+                            project_root: &instruction_root,
+                            tool_use_enforcement: nib_cfg.agent.tool_use_enforcement,
+                            context_length: nib_cfg.llm.context_length,
+                        })
+                        .and_then(|input| {
+                            ensure_required_instructions_present(&input, &context_sections.agents)?;
+                            Ok(input)
+                        });
+                        match refreshed {
+                            Ok(input) if input.messages.get(1..) == messages.get(1..) => {
+                                messages = input.messages;
+                                llm_tools = input.tools;
+                                reusable_system_prefix = input.reusable_system_prefix_bytes;
+                            }
+                            _ => {
+                                reconciliation_reason = Some("context_limit".to_string());
+                                state = transition_state(
+                                    &store,
+                                    session_id,
+                                    state,
+                                    AgentState::Reconciliation,
+                                    &mut trace,
+                                    &mut transition_count,
+                                    &cfg.stream_tx,
+                                )
+                                .await?;
+                                continue;
+                            }
+                        }
+                    }
                     let skip_rebuild = if let Some(continuation) = provider_continuation.as_ref() {
                         let estimated =
                             approximate_llm_input_tokens(&messages, llm_tools.as_deref());
@@ -1424,6 +1483,7 @@ pub(crate) async fn run_agent_loop_inner(
                                     .to_event_details(&run_id),
                                 )
                                 .map_err(|error| error.to_string())?;
+                            continuation_base = Some(session.clone());
                             messages = bounded.messages;
                             reusable_system_prefix = bounded.reusable_system_prefix_bytes;
                             llm_tools = bounded.tools;
@@ -1665,6 +1725,28 @@ pub(crate) async fn run_agent_loop_inner(
                         "tool_proposal_commit"
                     },
                 )? {
+                    continue;
+                }
+                if tool_calls.is_empty() && !pending_scope_calls.is_empty() {
+                    update_plan_tool_outcome(
+                        &store,
+                        session_id,
+                        active_plan_id.as_deref(),
+                        &normalized_goal,
+                        false,
+                        "Required terminal scope remains unrepaired; completion is not established",
+                    )?;
+                    reconciliation_reason = Some("tool_scope_required".to_string());
+                    state = transition_state(
+                        &store,
+                        session_id,
+                        state,
+                        AgentState::Reconciliation,
+                        &mut trace,
+                        &mut transition_count,
+                        &cfg.stream_tx,
+                    )
+                    .await?;
                     continue;
                 }
                 if tool_calls.is_empty() {
