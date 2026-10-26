@@ -1012,3 +1012,23 @@ publication 0.7.1 is confirmed at ea889ae by manifest and successful artifact ru
 adapter configurations have offline multi-round complete/streaming coverage.
 T023 remains in development because its separate live-provider qualification is
 incomplete; no paid provider calls were made by this implementation.
+
+
+## 2026-10-26 - T023 diagnostic preparation boundary
+
+- Type: decision
+- Source: user-authorized T023 fix preparation
+- Confidence: high
+- Review: independent exact-candidate review and offline verification required
+- Supersedes: none
+
+Content:
+
+Live qualification reports distinguish initial tool request/validation, tool-result
+construction, and continuation request/validation through a bounded enum, without
+recording provider content. Hosted retention remains seven days; preserve a sanitized
+source-bound evidence summary before expiry. The first proposed paid diagnostic uses
+selected claude-opus-5; a later canary uses the independently configured default.
+The proposed USD 2 combined ceiling is not spending approval. Protected configuration,
+account hard caps and explicit user spending authority remain prerequisites. This
+qualification-only slice changes no shipped adapter and establishes no live pass.

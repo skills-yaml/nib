@@ -54,8 +54,18 @@ pub(super) struct CatalogEntryReport {
     justification: AccountingJustification,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ToolFailurePhase {
+    InitialRequest,
+    ToolResult,
+    Continuation,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct ScenarioReport {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_failure_phase: Option<ToolFailurePhase>,
     pub scenario: ScenarioId,
     pub passed: bool,
     pub duration_ms: u64,
@@ -1625,6 +1635,23 @@ fn validate_scenario_execution_evidence(
             scenario.http_status
         ));
     }
+    if let Some(phase) = scenario.tool_failure_phase {
+        let requests_match = match phase {
+            ToolFailurePhase::InitialRequest => scenario.actual_logical_requests <= 1,
+            ToolFailurePhase::ToolResult => scenario.actual_logical_requests == 1,
+            ToolFailurePhase::Continuation => (1..=2).contains(&scenario.actual_logical_requests),
+        };
+        if !requests_match
+            || scenario.passed
+            || scenario.not_executed_reason.is_some()
+            || !matches!(
+                scenario.scenario,
+                ScenarioId::SingleToolContinuation | ScenarioId::ParallelToolContinuation
+            )
+        {
+            return Err("qualification tool failure phase is inconsistent".to_string());
+        }
+    }
     if scenario.passed
         && (scenario.actual_logical_requests != expected_requests
             || scenario.actual_attempts.is_none()
@@ -1920,6 +1947,9 @@ fn markdown_summary(report: &QualificationReport) -> String {
                         .not_executed_reason
                         .map_or_else(String::new, |reason| format!(", not executed: {reason:?}"))
                 ));
+                if let Some(phase) = scenario.tool_failure_phase {
+                    output.push_str(&format!("    - Tool failure phase: `{phase:?}`\n"));
+                }
             }
             for evidence in &profile.not_applicable_evidence {
                 output.push_str(&format!(
@@ -2879,6 +2909,7 @@ mod tests {
         let requests = scenario.logical_requests();
         let requests_u64 = requests as u64;
         ScenarioReport {
+            tool_failure_phase: None,
             scenario,
             passed: true,
             duration_ms: 1,
@@ -2897,6 +2928,41 @@ mod tests {
             not_executed_reason: None,
             safe_error_class: None,
         }
+    }
+
+    #[test]
+    fn tool_failure_phase_rejects_success_and_non_tool_scenarios() {
+        let report = passing_generation_report(LiveMode::Canary);
+        let profile = &report.providers[0].profiles[0];
+        let mut scenario = passing_scenario(ScenarioId::SingleToolContinuation);
+        scenario.tool_failure_phase = Some(ToolFailurePhase::Continuation);
+        assert!(
+            validate_scenario_execution_evidence(profile, &scenario, &report.budget_limits)
+                .is_err()
+        );
+        scenario.passed = false;
+        scenario.safe_error_class = Some("response_refused".to_string());
+        validate_scenario_execution_evidence(profile, &scenario, &report.budget_limits).unwrap();
+        for phase in [
+            ToolFailurePhase::InitialRequest,
+            ToolFailurePhase::ToolResult,
+        ] {
+            scenario.tool_failure_phase = Some(phase);
+            assert!(validate_scenario_execution_evidence(
+                profile,
+                &scenario,
+                &report.budget_limits
+            )
+            .is_err());
+        }
+
+        let mut text = passing_scenario(ScenarioId::CompleteText);
+        text.passed = false;
+        text.safe_error_class = Some("response_refused".to_string());
+        text.tool_failure_phase = Some(ToolFailurePhase::InitialRequest);
+        assert!(
+            validate_scenario_execution_evidence(profile, &text, &report.budget_limits).is_err()
+        );
     }
 
     fn report(run_id: &str, complete: bool, passed: bool) -> QualificationReport {
@@ -3529,6 +3595,7 @@ mod tests {
                 .required_scenarios
                 .iter()
                 .map(|scenario| ScenarioReport {
+                    tool_failure_phase: None,
                     scenario: *scenario,
                     passed: false,
                     duration_ms: 0,
