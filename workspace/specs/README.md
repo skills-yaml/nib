@@ -129,7 +129,7 @@ new work requires verified main merge. See [SDLC](../instructions/tech/sdlc.md).
 | [D001](done/workspace-governance/D001_workspace_docs_adoption_and_foundational_spec_alignment.md) | workspace-governance | done | Preserved historical done under the prior 1.2.0 completion contract; no v7 main-merge event inferred. |
 | [T065](done/workspace-governance/T065_preserve_workspace_checkout_bytes.md) | workspace-governance | done | Verified main merge at 4b0245b9890bb15a4c99ff46ec7296d42bf9401f; independent exact review and required native/hosted qualification passed; acceptance, versions, catalog and memory reconciled; publication tracked separately. |
 | [T066](done/build-quality/T066_scoped_delegation_failure_fixture.md) | build-quality | done | Verified main merge at 4b0245b9890bb15a4c99ff46ec7296d42bf9401f; independent exact review and required native/hosted qualification passed; acceptance, versions, catalog and memory reconciled; publication tracked separately. |
-| [T090](development/agent-runtime/T090_tool_history_and_status_recovery.md) | agent-runtime | development | Implementation authorized 2026-10-26; cumulative history, bounded recovery and verification applicability; fresh patch 0.7.1 applied, acceptance and shared integration pending. |
+| [T090](development/agent-runtime/T090_tool_history_and_status_recovery.md) | agent-runtime | development | Local implementation and focused acceptance verified; 0.7.1 applied; final exact review, complete gates and shared integration pending. |
 <!-- SPEC-CATALOG:END -->
 
 ## Version and Memory Impact

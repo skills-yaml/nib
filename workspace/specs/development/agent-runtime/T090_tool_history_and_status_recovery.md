@@ -168,31 +168,31 @@ to establish outgoing request correctness or deterministic recovery.
 
 ## Acceptance Criteria
 
-- [ ] AC-1: A scripted provider requires at least three successive tool batches
+- [x] AC-1: A scripted provider requires at least three successive tool batches
   (skill load, Git status, another inspection) and a final response. Every later
   outgoing request retains all earlier pairs exactly once; the report completes.
   Assert request bodies, not merely final wording, in streaming and complete modes.
-- [ ] AC-2: All supported adapters satisfy cumulative history, parallel calls,
+- [x] AC-2: All supported adapters satisfy cumulative history, parallel calls,
   error results, scope mismatch, cancellation/steering, private metadata and
   cumulative budget boundaries. Skill and plan updates remain visible. Fixtures
   prove no unauthorized tool executes after malformed/truncated provider output.
-- [ ] AC-3: Repeated successful identical and alternating two-batch cycles receive
+- [x] AC-3: Repeated successful identical and alternating two-batch cycles receive
   one corrective opportunity and a bounded terminal outcome if unchanged. New
   evidence, legitimate polling and real plan progress do not falsely trip it.
-- [ ] AC-4: An opaque terminal command with missing scope produces no approval
+- [x] AC-4: An opaque terminal command with missing scope produces no approval
   request or shell execution, retains its plan and receives a repair observation.
   A corrected scope executes once after normal authorization; repeated invalid
   proposals stop after two repair attempts with actionable partial findings.
-- [ ] AC-5: Mixed-batch recovery preserves successful calls exactly once. Denial,
+- [x] AC-5: Mixed-batch recovery preserves successful calls exactly once. Denial,
   outside paths, missing instructions and cancellation remain fail-closed. Live
   and reloaded plain/TUI states show no orphaned approval or falsely completed step.
-- [ ] AC-6: `repo status` with a report-only contract and project implementation
+- [x] AC-6: `repo status` with a report-only contract and project implementation
   gates creates no unrelated `task verify` obligation and runs no tests. An explicit
   human verification request and applicable project reporting gate remain enforced.
-- [ ] AC-7: Implementation plans retain their required gates; mutations invalidate
+- [x] AC-7: Implementation plans retain their required gates; mutations invalidate
   prior evidence. Negated/example text does not create obligations, model-supplied
   read-only claims cannot waive them, and ambiguous applicability is surfaced.
-- [ ] AC-8: Offline end-to-end status reproduction loads the skill once, preserves
+- [x] AC-8: Offline end-to-end status reproduction loads the skill once, preserves
   observations, repairs a missing scope and delivers a report with limitations.
   The no-progress fixture terminates usefully instead of announcing repeated intent.
 - [ ] AC-9: Independent review and all required native gates pass on the frozen
@@ -249,8 +249,9 @@ at handoff; t090-author owns the single 0.7.1 bump.
 
 ## Memory Impact
 
-Status: pending
-Rationale: Implementation and its durable acceptance evidence remain unresolved.
+Status: updated
+Rationale: The implementation contract and separate T023 live-qualification boundary
+are recorded in decisions.md and changelog.md; delivery evidence remains tracked here.
 
 ## Implementation Start (2026-10-26)
 
@@ -279,5 +280,17 @@ partial findings. Unit fixtures cover alternating cycles, evidence/step/poll res
 quoted and negated verification text, command boundaries and ambiguous applicability.
 Interactive fixtures compare live and reloaded failure presentation.
 
-Final acceptance and integration evidence remain pending until the reviewed
-candidate passes the required gates. No live-provider qualification is inferred.
+AC-1/2 are supported by `test:t090-history` and `test:llm-conformance`;
+AC-3 by the semantic guard and scripted no-progress fixtures; AC-4/5 by
+`test:t090-runtime`, `test:terminal-preflight`, `test:interactive` and
+`test:tui-shutdown`; AC-6/7 by applicability, exact-command authority and mutation
+invalidation fixtures; AC-8 by the scripted status fixture. The legacy coding
+fixture retains wrapped Cargo testing under a non-exact request; a separate
+success/unresolved fixture enforces explicit human `task check` exactly.
+Report scope also rejects repository executables masquerading as read-only
+utilities, including compound segments.
+
+Independent review of 847fb8e approved the adapter/spec slice and identified one
+runtime scope finding; the subsequent path-qualified executable rejection resolves
+it. Final exact review, full native gates and shared integration remain required
+for AC-9. No live-provider qualification is inferred.

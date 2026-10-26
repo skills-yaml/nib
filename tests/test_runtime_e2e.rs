@@ -3829,7 +3829,10 @@ async fn full_agent_loop_compresses_edits_and_runs_real_cargo_tests_in_one_workt
             .expect("historic assistant message");
     }
     let raw_history = store.load(&session.id).expect("historic session").messages;
-    let goal = "runtime coding e2e: update answer and run cargo test";
+    // This fixture exercises its wrapped Cargo invocation. An exact human
+    // command now creates its own bound verification obligation (T090), covered
+    // separately below; do not pretend the wrapper is that exact command.
+    let goal = "runtime coding e2e: update answer and exercise the project tests";
 
     let summary = run_agent_loop(
         root.path().to_path_buf(),
@@ -5279,4 +5282,53 @@ async fn t090_report_keeps_skill_history_repairs_scope_and_omits_implementation_
     assert!(text.contains("STATUS_PROOF_ACTIVE_INSTRUCTIONS"));
     assert!(text.contains("private-status-0"));
     assert!(text.contains("private-repair-0"));
+}
+
+#[tokio::test]
+async fn t090_explicit_human_verification_requires_the_exact_bound_command() {
+    use sha2::{Digest, Sha256};
+    for execute in [false, true] {
+        let root = git_repository();
+        std::fs::write(
+            root.path().join("Taskfile.yml"),
+            "version: '3'\ntasks:\n  check:\n    cmds:\n      - echo checked\n",
+        )
+        .unwrap();
+        let fingerprint = format!("{:x}", Sha256::digest(b"task check"));
+        let mut turns = Vec::new();
+        if execute {
+            turns.push(failure_fixture_tool_turn(
+                "check",
+                vec![(
+                    "run_terminal",
+                    json!({
+                        "command":"task check", "affected_paths":["."],
+                        "verification_id": format!("required-command-{}", &fingerprint[..16])
+                    }),
+                )],
+            ));
+        }
+        turns.push(failure_fixture_text_turn());
+        let (summary, session, _, _) = run_failure_fixture_with_goal(
+            root.path(),
+            turns,
+            None,
+            Vec::new(),
+            if execute { 2 } else { 1 },
+            None,
+            "Run `task check`",
+        )
+        .await;
+        assert_eq!(
+            summary.outcome,
+            if execute {
+                "completed"
+            } else {
+                "required_verification_unresolved"
+            }
+        );
+        let obligation = &session.plan.as_ref().unwrap().steps[0].verification_obligations[0];
+        assert_eq!(obligation.authority, VerificationAuthority::Human);
+        assert_eq!(obligation.status == VerificationStatus::Passed, execute);
+    }
 }

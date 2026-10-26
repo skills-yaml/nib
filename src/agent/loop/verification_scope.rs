@@ -214,6 +214,19 @@ pub(crate) fn report_tool_allowed(goal: &str, instructions: &str, call: &ToolCal
     if matches!(call.name.as_str(), "ask_question" | "write_plan") {
         return true;
     }
+    if call.name == "run_terminal" {
+        let command = call.arguments["command"].as_str().unwrap_or_default();
+        // A local executable named `ls`/`git` is not the trusted utility that
+        // the risk classifier describes. Check every compound segment.
+        if command.split([';', '|', '&', '\n']).any(|segment| {
+            segment
+                .split_whitespace()
+                .next()
+                .is_some_and(|program| program.contains(['/', '\\']))
+        }) {
+            return false;
+        }
+    }
     if call.name == "run_terminal"
         && call.arguments["command"].as_str() == Some("task verify")
         && project_verify_applies(goal, instructions)
@@ -248,6 +261,16 @@ mod tests {
             "",
             &ToolCallRequest::new("git_status", json!({}))
         ));
+        for command in ["./ls", "./git status", "git status && ./ls", "ls | bin/wc"] {
+            assert!(!report_tool_allowed(
+                "repo status",
+                "",
+                &ToolCallRequest::new(
+                    "run_terminal",
+                    json!({"command":command, "affected_paths":["."]})
+                )
+            ));
+        }
     }
     #[test]
     fn implementation_gates_do_not_apply_to_reports_but_reporting_gates_do() {

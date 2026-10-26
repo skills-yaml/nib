@@ -284,7 +284,9 @@ scope repair never triggers model escalation.
 Exact read-only status requests exclude implementation-only verification gates.
 Explicit human commands and project gates applying to reports remain obligations;
 ambiguous applicability requires clarification. A potentially mutating proposal
-under report-only scope stops with `report_scope_conflict`. Model labels cannot
+under report-only scope stops with `report_scope_conflict`. Path-qualified terminal
+executables cannot inherit the read-only classification of a system utility.
+Model labels cannot
 waive obligations. Quoted examples and negated commands supply no execution authority.
 
 Each agent run also persists bounded `agent_resource_usage` evidence: logical
