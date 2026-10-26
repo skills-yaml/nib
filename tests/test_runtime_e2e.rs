@@ -5109,7 +5109,7 @@ async fn t090_missing_scope_repairs_once_without_replaying_successful_reads() {
             json!({"command":command, "affected_paths":[]}),
         )];
         if repair == 0 {
-            calls.insert(0, ("git_status", json!({})));
+            calls.insert(0, ("list_directory", json!({"path":"src"})));
         }
         turns.push(failure_fixture_tool_turn(
             &format!("missing-{repair}"),
@@ -5130,7 +5130,7 @@ async fn t090_missing_scope_repairs_once_without_replaying_successful_reads() {
         session
             .tool_calls
             .iter()
-            .filter(|call| call.tool_name.as_deref() == Some("git_status"))
+            .filter(|call| call.tool_name.as_deref() == Some("list_directory"))
             .count(),
         1
     );
@@ -5170,7 +5170,7 @@ async fn t090_successful_repetition_gets_one_correction_then_partial_findings() 
             .map(|index| {
                 failure_fixture_tool_turn(
                     &format!("repeat-{index}"),
-                    vec![("git_status", json!({}))],
+                    vec![("list_directory", json!({"path":"src"}))],
                 )
             })
             .collect(),
@@ -5191,7 +5191,7 @@ async fn t090_successful_repetition_gets_one_correction_then_partial_findings() 
             .count(),
         1
     );
-    assert!(summary.last_message.unwrap().contains("git_status"));
+    assert!(summary.last_message.unwrap().contains("list_directory"));
 }
 
 #[tokio::test]
