@@ -251,7 +251,9 @@ at handoff; t090-author owns the single 0.7.1 bump.
 
 Status: updated
 Rationale: The implementation contract and separate T023 live-qualification boundary
-are recorded in decisions.md and changelog.md; delivery evidence remains tracked here.
+are recorded in [workspace/agents/memory/decisions.md](../../../agents/memory/decisions.md)
+and [workspace/agents/memory/changelog.md](../../../agents/memory/changelog.md);
+delivery evidence remains tracked here.
 
 ## Implementation Start (2026-10-26)
 

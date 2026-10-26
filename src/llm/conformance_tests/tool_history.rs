@@ -108,21 +108,20 @@ async fn multi_round_history_keeps_every_prior_exchange_once() {
                     .unwrap();
                 }
                 replay_bound = next.encoded_bytes();
-                assert_eq!(
-                    crate::context::snapshot::continuation_dispatch(1000, 100, 0, 0),
-                    crate::context::snapshot::ContinuationDispatch::Send
-                );
-                assert_eq!(
-                    crate::context::snapshot::continuation_dispatch(
-                        1000,
-                        100,
-                        replay_bound,
-                        next.unresolved_count()
-                    ),
-                    crate::context::snapshot::ContinuationDispatch::Rebuild
-                );
+                assert_continuation_exceeds_small_window(replay_bound, next.unresolved_count());
                 continuation = Some(next);
             }
         }
     }
+}
+
+fn assert_continuation_exceeds_small_window(replay_bound: usize, unresolved: usize) {
+    assert_eq!(
+        crate::context::snapshot::continuation_dispatch(1000, 100, 0, 0),
+        crate::context::snapshot::ContinuationDispatch::Send
+    );
+    assert_eq!(
+        crate::context::snapshot::continuation_dispatch(1000, 100, replay_bound, unresolved),
+        crate::context::snapshot::ContinuationDispatch::Rebuild
+    );
 }
