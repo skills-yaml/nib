@@ -1,7 +1,7 @@
 # T091: Stable Selection of Tall Transcript Blocks
 
-**Status:** Development
-State: development
+**Status:** Test — integrated into development through PR #80 on 2026-10-26.
+State: test
 Primary Feature: interactive
 
 ## Problem
@@ -56,14 +56,14 @@ copy payload format changes.
 
 ## Acceptance Criteria
 
-- [ ] AC-1: Repeated selection of a block taller than the page, including one
+- [x] AC-1: Repeated selection of a block taller than the page, including one
   whose tail is already visible while follow-tail is on, keeps the same top
   row and does not clear follow-tail.
-- [ ] AC-2: A tall block that sits entirely below the current window reveals
+- [x] AC-2: A tall block that sits entirely below the current window reveals
   its first row once, and a second reveal leaves that top row unchanged.
-- [ ] AC-3: A short block still scrolls to its first row when it starts above
+- [x] AC-3: A short block still scrolls to its first row when it starts above
   the window and to its last row when it ends below the window.
-- [ ] AC-4: The user guide states that a block taller than the page stays put
+- [x] AC-4: The user guide states that a block taller than the page stays put
   when already visible and otherwise opens at its first row.
 
 ## Implementation Plan
@@ -98,3 +98,24 @@ with no persisted state to migrate.
 Status: none
 Rationale: The stable viewport is a defect repair of the existing selection
 contract. It adds no new preference, decision, or durable fact beyond this spec.
+
+## Integration Evidence
+
+Revision: 18705e72e9c8b6f8dc341205e929a20feded1f05
+Outcome: passed
+
+PR [#80](https://github.com/skills-yaml/nib/pull/80) merged into `development` at
+`18705e72e9c8b6f8dc341205e929a20feded1f05` on 2026-10-26T15:50:03Z. The merged
+tree matches branch tip `e657398625ba8fc94a50c3b1cd860007462be239`. This record
+moves T091 to `test` and applies no second version bump. Patch 0.7.2 stays
+applied. Main delivery and publication remain separate and unverified.
+
+AC-1 and AC-2 are the repeated-reveal cases in
+`selected_block_taller_than_the_page_does_not_flicker`. AC-3 is
+`selected_transcript_block_is_kept_inside_the_row_viewport`. AC-4 is the
+selection paragraph in `workspace/docs/user/guide.md`. Those render tests
+passed on `a1018ed` before the T090 combine; the selection sources were
+unchanged by that combine, and the merged tree matches the resolution tip.
+`task test:interactive`, `task docs:check`, and `task versions:check` passed
+on the fix branch before that combine. `task verify` and hosted CI were not
+run on `e657398` or `18705e72`.

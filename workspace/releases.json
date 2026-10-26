@@ -247,9 +247,9 @@
       "owner": "t091-selection",
       "version_source": "Cargo.toml",
       "specs": [
-        "workspace/specs/development/interactive/T091_stable_tall_transcript_selection.md"
+        "workspace/specs/test/interactive/T091_stable_tall_transcript_selection.md"
       ],
-      "evidence": "User reported transcript flicker on 2026-10-26 when selecting a row after the chat grew past one page. Published development 0.7.1 belongs to T090 and is closed, so the occupied 0.7.1 target is reconciled to fresh patch 0.7.2 from that baseline. Owner t091-selection applies Cargo.toml, Cargo.lock, and the skills.yaml project version once before integration. Application is not integration, main delivery, or publication."
+      "evidence": "User reported transcript flicker on 2026-10-26 when selecting a row after the chat grew past one page. Published development 0.7.1 belongs to T090 and is closed, so the occupied 0.7.1 target is reconciled to fresh patch 0.7.2 from that baseline. Owner t091-selection applies Cargo.toml, Cargo.lock, and the skills.yaml project version once before integration. Application is not integration, main delivery, or publication. Confirmed shared development merge 18705e72e9c8b6f8dc341205e929a20feded1f05 via PR80 on 2026-10-26T15:50:03Z, pinned to branch tip e657398625ba8fc94a50c3b1cd860007462be239 with identical trees. T091 moves to test without a second version application. Main delivery and publication remain separate and unverified."
     }
   ]
 }
