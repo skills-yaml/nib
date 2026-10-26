@@ -1,7 +1,7 @@
 # T090: Preserve Tool History and Recover Read-Only Status Work
 
-**Status:** Development — user authorized implementation on 2026-10-26.
-State: development
+**Status:** Test — integrated into development through PR #78 on 2026-10-26.
+State: test
 Primary Feature: agent-runtime
 
 ## Problem and Evidence
@@ -195,14 +195,13 @@ to establish outgoing request correctness or deterministic recovery.
 - [x] AC-8: Offline end-to-end status reproduction loads the skill once, preserves
   observations, repairs a missing scope and delivers a report with limitations.
   The no-progress fixture terminates usefully instead of announcing repeated intent.
-- [ ] AC-9: Independent review and all required native gates pass on the frozen
+- [x] AC-9: Independent review and all required native gates pass on the frozen
   candidate; actual integration, lifecycle, version and memory records reconcile.
 
 ## Validation Gates
 
-For this specification-only change: independent contract review, `task docs:check`
-and the repository-required `task verify`. Passing these validates the artifact,
-not implementation acceptance criteria.
+Initial specification authoring used independent contract review, `task docs:check`
+and `task verify`. Implementation evidence and shared integration are recorded below.
 
 For implementation, add red regressions first and run in dependency order:
 
@@ -236,9 +235,9 @@ reuse a published release. Main merge and publication are separate events.
 
 ## Version Impact
 
-Implementation is authorized and the development-start reservation is applied. Move
-to test only after confirmed integration into `development`; done requires verified
-`main` delivery and reconciled acceptance, documentation, versions and memory.
+The development-start reservation was applied once. Shared `development` integration
+is confirmed below; `done` still requires verified `main` delivery and reconciliation.
+Publication is separate from this test-state transition.
 
 | Component | Impact | Release | Rationale |
 | --- | --- | --- | --- |
@@ -252,7 +251,8 @@ at handoff; t090-author owns the single 0.7.1 bump.
 Status: updated
 Rationale: The implementation contract and separate T023 live-qualification boundary
 are recorded in [workspace/agents/memory/decisions.md](../../../agents/memory/decisions.md)
-and [workspace/agents/memory/changelog.md](../../../agents/memory/changelog.md);
+and [workspace/agents/memory/changelog.md](../../../agents/memory/changelog.md).
+Integration is recorded in [workspace/agents/memory/facts.md](../../../agents/memory/facts.md);
 delivery evidence remains tracked here.
 
 ## Implementation Start (2026-10-26)
@@ -294,5 +294,41 @@ utilities, including compound segments.
 
 Independent review of 847fb8e approved the adapter/spec slice and identified one
 runtime scope finding; the subsequent path-qualified executable rejection resolves
-it. Final exact review, full native gates and shared integration remain required
-for AC-9. No live-provider qualification is inferred.
+it. Final exact review and implementation gates passed as recorded below; shared
+integration is confirmed. Lifecycle-record verification results are reported at delivery. No live-provider qualification is inferred.
+
+## Integration Evidence
+
+Revision: ea889aea84358da0cded4bf129fe7e028917c479
+Outcome: passed
+
+PR [#78](https://github.com/skills-yaml/nib/pull/78) merged into `development` at
+`ea889aea84358da0cded4bf129fe7e028917c479` on 2026-10-26T11:30:52Z, pinned to
+reviewed head `96a2e072394d4c5eb9e1256f59118e26493b4d7f`. The merged tree matches
+that head. Independent runtime/security and adapter/spec reviews approved the
+candidate; fresh `task verify` and `task docs:check` passed. Hosted run
+[40309841661](https://github.com/skills-yaml/nib/actions/runs/40309841661) passed
+Linux validation, coverage, optimized-binary qualification and smoke checks,
+and macOS tests, optimized qualification and native interaction smoke checks.
+Windows was skipped under the repository's development-target policy.
+
+One unchanged installer cleanup fixture failed in an earlier local run, then
+passed in an unchanged 44-test diagnostic rerun and final complete verification;
+its intermittent cause was not established. macOS exposed two fixtures depending
+on Linux-only strict Git isolation; portable successful directory reads now test
+recovery/no-progress while the original status-workflow fixture remains covered.
+
+This record moves T090 to `test`, updates its catalog and release membership,
+and applies no second version bump. The final records candidate receives fresh
+independent review, documentation and complete native verification before delivery;
+results are reported at handoff without another tracked result-only edit.
+Main integration remains unverified, so this is not a `done` transition.
+
+## Development Publication Evidence
+
+On 2026-10-26, successful Release Artifacts run
+[40315639494](https://github.com/skills-yaml/nib/actions/runs/40315639494) completed
+at 11:42:53Z. The public development manifest binds version `0.7.1` to
+`ea889aea84358da0cded4bf129fe7e028917c479`. The release reservation is therefore
+closed to new implementation members. Later documentation commits are not covered
+by this observed publication event; main delivery remains separate and unverified.

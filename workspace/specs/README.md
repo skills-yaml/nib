@@ -129,7 +129,7 @@ new work requires verified main merge. See [SDLC](../instructions/tech/sdlc.md).
 | [D001](done/workspace-governance/D001_workspace_docs_adoption_and_foundational_spec_alignment.md) | workspace-governance | done | Preserved historical done under the prior 1.2.0 completion contract; no v7 main-merge event inferred. |
 | [T065](done/workspace-governance/T065_preserve_workspace_checkout_bytes.md) | workspace-governance | done | Verified main merge at 4b0245b9890bb15a4c99ff46ec7296d42bf9401f; independent exact review and required native/hosted qualification passed; acceptance, versions, catalog and memory reconciled; publication tracked separately. |
 | [T066](done/build-quality/T066_scoped_delegation_failure_fixture.md) | build-quality | done | Verified main merge at 4b0245b9890bb15a4c99ff46ec7296d42bf9401f; independent exact review and required native/hosted qualification passed; acceptance, versions, catalog and memory reconciled; publication tracked separately. |
-| [T090](development/agent-runtime/T090_tool_history_and_status_recovery.md) | agent-runtime | development | Local implementation and focused acceptance verified; 0.7.1 applied; final exact review, complete gates and shared integration pending. |
+| [T090](test/agent-runtime/T090_tool_history_and_status_recovery.md) | agent-runtime | test | Confirmed development merge ea889ae via PR78 on 2026-10-26, pinned to reviewed and locally/hosted-qualified head 96a2e07; 0.7.1 applied once; main delivery remains unverified. |
 <!-- SPEC-CATALOG:END -->
 
 ## Version and Memory Impact
@@ -155,7 +155,7 @@ and Linux/macOS/Windows CI 37419726793 passed on that exact revision. Question
 forms, conversational recovery, Esc interruption and proposal chat are delivered;
 `/plan` and `/questions` are removed from interactive commands. See
 [T061](done/interactive/T061_question_form.md) for criterion evidence and actual events.
-Current catalog: **78 done, 17 test, 2 development, and 0 backlog**. Publication is separate.
+Current catalog: **78 done, 18 test, 1 development, and 0 backlog**. Publication is separate.
 
 The 2026-07-15 audit inspected all 27 specs that had claimed completion. Unsupported
 claims moved through `development/`; missing feasible behavior was implemented and

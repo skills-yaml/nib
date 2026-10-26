@@ -228,13 +228,13 @@
       "target": "0.7.1",
       "impact": "patch",
       "timing": "development-start",
-      "status": "applied",
+      "status": "released",
       "owner": "t090-author",
       "version_source": "Cargo.toml",
       "specs": [
-        "workspace/specs/development/agent-runtime/T090_tool_history_and_status_recovery.md"
+        "workspace/specs/test/agent-runtime/T090_tool_history_and_status_recovery.md"
       ],
-      "evidence": "User authorized implementation on 2026-10-26. Public development manifest binds published 0.7.0 to b766d62. Peer runtime refuses an uninitialized ownership board; preserve it and use established single-author ledger fallback. Fresh patch 0.7.1 is applied once by t090-author; no integration or publication inferred."
+      "evidence": "User authorized implementation on 2026-10-26. Public development manifest binds published 0.7.0 to b766d62. Peer runtime refuses an uninitialized ownership board; preserve it and use established single-author ledger fallback. Fresh patch 0.7.1 is applied once by t090-author; no integration or publication inferred. Confirmed shared development merge ea889aea84358da0cded4bf129fe7e028917c479 via PR78 on 2026-10-26T11:30:52Z, pinned to reviewed and native/hosted-qualified head 96a2e07 with matching trees. T090 moves to test without a second version application. Main delivery and publication are separate. Publication observed 2026-10-26: successful Release Artifacts run 40315639494 completed at 11:42:53Z and development-latest/nib-release.json binds 0.7.1 to ea889aea84358da0cded4bf129fe7e028917c479. Close this published reservation to new implementation members; future runtime changes require a fresh target. This observed event does not establish publication of later documentation commits."
     }
   ]
 }

@@ -993,3 +993,22 @@ used only one tool batch, so T090's third-request history loss does not explain 
 Secret-name presence and configured budgets do not establish spend authority;
 paid qualification requires the protected approvals and retained exact-revision
 reports. No paid provider requests were made by this work.
+
+## 2026-10-26 - T090 status recovery integrated for testing
+
+- Type: fact
+- Source: PR #78 and hosted qualification run 40309841661
+- Confidence: high
+- Review: independent exact-candidate runtime/security and adapter/spec reviews
+- Supersedes: none
+
+Content:
+
+T090's tool-history and status-recovery implementation is integrated into shared
+development at ea889ae through PR #78, using patch 0.7.1 without a second bump.
+Its spec is in test; main delivery remains unverified. Initial development
+publication 0.7.1 is confirmed at ea889ae by manifest and successful artifact run
+40315639494; later runtime work requires a fresh version. All supported network
+adapter configurations have offline multi-round complete/streaming coverage.
+T023 remains in development because its separate live-provider qualification is
+incomplete; no paid provider calls were made by this implementation.
