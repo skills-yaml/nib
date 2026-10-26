@@ -254,6 +254,12 @@ fn is_read_only_command(words: &[&str]) -> bool {
     match program {
         "pwd" | "whoami" | "ls" | "wc" => true,
         "git" => {
+            if words.get(1..3) == Some(&["worktree", "list"]) {
+                return words
+                    .iter()
+                    .skip(3)
+                    .all(|word| matches!(*word, "--porcelain" | "-z" | "-v" | "--verbose"));
+            }
             matches!(
                 words.get(1).copied(),
                 Some("status" | "log" | "diff" | "show" | "rev-parse")
@@ -285,6 +291,8 @@ mod tests {
     fn read_only_sequences_and_pipelines_are_read_only() {
         for command in [
             "git status; git log",
+            "git status --short --branch && git worktree list",
+            "git worktree list --porcelain -z",
             "git status --short && git diff --stat",
             "git status || ls",
             "git log --oneline | wc -l",
@@ -294,6 +302,9 @@ mod tests {
         }
         for command in [
             "git status; cargo build",
+            "git worktree add scratch",
+            "git worktree list --unknown",
+            "git worktree list > inventory",
             "git log | sh",
             "git status > out.txt",
             "git status && rm -rf target",

@@ -4,6 +4,8 @@ mod anthropic_bounded;
 mod anthropic_continuation;
 #[path = "conformance_tests/anthropic_history.rs"]
 mod anthropic_history;
+#[path = "conformance_tests/tool_history.rs"]
+mod tool_history;
 
 use super::*;
 use crate::config::{LlmConfig, ProviderEntry};

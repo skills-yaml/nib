@@ -181,7 +181,26 @@ match state {
                     .await?;
                     continue;
                 }
-                let batch_requires_worktree = tool_calls.iter().any(|call| {
+                if tool_calls.iter().any(|call| !report_tool_allowed(&normalized_goal, &context_sections.agents, call)) {
+                    store.record_event(session_id, "report_scope_conflict", json!({
+                        "reason":"A read-only report requested a tool with unproven read-only effects; clarify scope before executing it."
+                    })).map_err(|error| error.to_string())?;
+                    update_plan_tool_outcome(&store, session_id, active_plan_id.as_deref(), &normalized_goal,
+                        false, "Read-only reporting scope needs clarification before a potentially mutating tool")?;
+                    reconciliation_reason = Some("report_scope_conflict".to_string());
+                    state = transition_state(&store, session_id, state, AgentState::Reconciliation,
+                        &mut trace, &mut transition_count, &cfg.stream_tx).await?;
+                    continue;
+                }
+                // Reject repairable proposal syntax before preparation or approval.
+                for call in &tool_calls {
+                    if let Err(error) = tool_instruction_scopes(&instruction_root, &call.name, &call.arguments) {
+                        if tool_scope_preflight_message(&error) == TERMINAL_SCOPE_REQUIRED_MESSAGE {
+                            preflight_failures.insert(call.invocation_id, TERMINAL_SCOPE_REQUIRED_MESSAGE);
+                        }
+                    }
+                }
+                let batch_requires_worktree = tool_calls.iter().filter(|call| !preflight_failures.contains_key(&call.invocation_id)).any(|call| {
                     crate::tools::registry::get_tool_metadata(&call.name)
                         .is_some_and(|metadata| metadata.requires_worktree)
                 });
@@ -445,6 +464,7 @@ match state {
                 }
                 instruction_scopes = proposed_scopes;
                 for call in &tool_calls {
+                    if preflight_failures.contains_key(&call.invocation_id) { continue; }
                     let tool_call = ToolCall {
                         invocation_id: call.invocation_id,
                         tool_name: call.name.clone(),
@@ -692,6 +712,9 @@ match state {
                             "output": Value::Null,
                             "error": message,
                         }));
+                        if *message == TERMINAL_SCOPE_REQUIRED_MESSAGE {
+                            pending_scope_calls.insert(scope_proposal_key(request));
+                        }
                         classifications.push(ToolResultClass::Error);
                         batch_success = false;
                         continue;
@@ -809,6 +832,8 @@ match state {
                             )
                             .await
                     };
+                    if result.success { pending_scope_calls.remove(&scope_proposal_key(request));
+                        if pending_scope_calls.is_empty() { scope_repair_attempts = 0; } }
                     if result.success && request.name == "load_skill" {
                         context_sections.skills = executor.skill_context(nib_cfg.llm.context_length);
                     }
@@ -996,17 +1021,30 @@ match state {
                     } else {
                         "one or more tools failed"
                     };
-                    let plan_updated = update_plan_tool_outcome(
-                        &store,
-                        session_id,
-                        active_plan_id.as_deref(),
-                        &normalized_goal,
-                        batch_success,
-                        tool_outcome,
-                    )?;
+                    let has_scope_failure = preflight_failures.values().any(|message| *message == TERMINAL_SCOPE_REQUIRED_MESSAGE);
+                    let repairable = has_scope_failure && !batch_denied
+                        && preflight_failures.values().all(|message| *message == TERMINAL_SCOPE_REQUIRED_MESSAGE)
+                        && observations.iter().all(|observation| observation["success"] == true
+                            || observation["error"] == TERMINAL_SCOPE_REQUIRED_MESSAGE);
+                    if repairable { scope_repair_attempts += 1; }
+                    let retry_scope = repairable && scope_repair_attempts <= 2;
+                    if retry_scope {
+                        store.record_event(session_id, "tool_scope_repair", json!({
+                            "attempt":scope_repair_attempts,"remaining":2-scope_repair_attempts,
+                            "instruction":"Correct affected_paths and retry only the rejected calls; completed calls must not be repeated."
+                        })).map_err(|error|error.to_string())?;
+                    }
+                    let plan_updated = if retry_scope {
+                        verify_bound_plan(&store, session_id, active_plan_id.as_deref(), &normalized_goal, true, "scope_repair")?
+                    } else {
+                        update_plan_tool_outcome(&store, session_id, active_plan_id.as_deref(),
+                            &normalized_goal, batch_success, tool_outcome)?
+                    };
                     let stalled =
                         failed_tool_batches.observe(&tool_calls, &observations, batch_success);
-                    let preflight_outcome = if !tool_calls.is_empty()
+                    let preflight_outcome = if repairable && !retry_scope {
+                        Some("tool_scope_required")
+                    } else if !retry_scope && !tool_calls.is_empty()
                         && preflight_failures.len() == tool_calls.len()
                     {
                         Some(if preflight_failures
@@ -1030,6 +1068,7 @@ match state {
                     // Denials and local preflight failures are human control or
                     // environment problems, not evidence for a stronger model.
                     let escalation_scheduled = if plan_updated
+                        && preflight_failures.is_empty()
                         && preflight_outcome.is_none()
                         && !batch_denied
                     {
@@ -1048,7 +1087,25 @@ match state {
                     if stalled && escalation_scheduled {
                         failed_tool_batches.reset();
                     }
-                    let stalled = stalled && !escalation_scheduled;
+                    let stalled = stalled && !escalation_scheduled && !retry_scope;
+                    let step = store.load_result(session_id).map_err(|error| error.to_string())?
+                        .and_then(|session| session.plan).map_or(0, |plan| plan.current_step_index);
+                    for observation in observations.iter().filter(|value| value["success"] == true) {
+                        progress_observations.push_back(json!({"tool":observation["tool"], "output":observation["output"]}));
+                        while progress_observations.len() > 4 { progress_observations.pop_front(); }
+                    }
+                    let progress = successful_tool_batches.observe(&tool_calls, &observations, batch_success, step);
+                    if progress == ProgressDecision::Correct {
+                        let instruction = "Repeated successful tool calls are returning unchanged evidence. Use the results already gathered: perform the next missing action or report findings and limitations. Do not repeat the same cycle.";
+                        context_sections.task.push_str(&format!("\nRuntime recovery: {instruction}"));
+                        store.record_event(session_id, "tool_progress_correction", json!({"instruction":instruction}))
+                            .map_err(|error| error.to_string())?;
+                    }
+                    let no_progress = progress == ProgressDecision::Stop;
+                    if no_progress {
+                        update_plan_tool_outcome(&store, session_id, active_plan_id.as_deref(),
+                            &normalized_goal, false, "Repeated tools made no progress after correction; saved observations remain available")?;
+                    }
                     tool_calls.clear();
                     response_content = None;
                     if !plan_updated {
@@ -1075,6 +1132,10 @@ match state {
                             &cfg.stream_tx,
                         )
                         .await?
+                    } else if no_progress {
+                        reconciliation_reason = Some("repeated_tool_no_progress".to_string());
+                        transition_state(&store, session_id, state, AgentState::Reconciliation,
+                            &mut trace, &mut transition_count, &cfg.stream_tx).await?
                     } else if batch_denied || stalled {
                         if stalled && !batch_denied {
                             record_repeated_tool_failure(&store, session_id, &run_id)?;
@@ -1513,6 +1574,12 @@ match state {
                                         "required project instructions are unavailable",
                                     )
                                 })
+                            } else if other == "report_scope_conflict" {
+                                "The report requested a tool whose effects are not proven read-only. Clarify the permitted scope before continuing; that tool was not executed.".to_string()
+                            } else if other == "repeated_tool_no_progress" {
+                                format!("Repeated tool calls returned unchanged results after recovery. The report is incomplete. Gathered observations (bounded):\n{}", crate::interactive::bounded_public_text(
+                                    &serde_json::to_string(&progress_observations).unwrap_or_default(),
+                                    &public_output_sensitive_values, 2048, true))
                             } else if other == "tool_scope_required" {
                                 TERMINAL_SCOPE_REQUIRED_MESSAGE.to_string()
                             } else {

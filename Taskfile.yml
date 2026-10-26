@@ -168,6 +168,24 @@ tasks:
       - '{{.FOCUSED_TEST}} --lib tools::executor::skills -- --test-threads=1'
       - '{{.FOCUSED_TEST}} --lib skill_cmd::tests -- --test-threads=1'
 
+  test:t090-runtime:
+    desc: Verify bounded recovery and reporting scope without live providers
+    deps: [test:focused-runner]
+    env:
+      NIB_HOME: '{{.ROOT_DIR}}/target/test-nib-home'
+    cmds:
+      - '{{.FOCUSED_TEST}} --lib agent::r#loop::recovery:: -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib agent::r#loop::verification_scope:: -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --test test_runtime_e2e t090_ -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --test test_runtime_e2e missing_terminal_scope -- --test-threads=1'
+
+  test:t090-history:
+    desc: Prove cumulative provider tool history across multiple rounds
+    deps: [test:focused-runner]
+    cmds:
+      - '{{.FOCUSED_TEST}} --lib llm::conformance::tests::tool_history:: -- --test-threads=1'
+      - '{{.FOCUSED_TEST}} --lib llm::types::tests::cumulative_native_history_bounds_ -- --test-threads=1'
+
   test:llm-conformance:
     desc: Run credential-free provider-neutral LLM adapter conformance tests
     deps: [test:focused-runner]

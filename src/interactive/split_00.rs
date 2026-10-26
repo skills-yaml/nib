@@ -1484,6 +1484,8 @@ pub fn terminal_outcome_message(outcome: &str) -> TerminalOutcomeMessage {
         "model_refusal" => ("Model declined the request", "No further work ran. Rephrase the request or select a different model."),
         "empty_model_response" => ("Model returned no answer", "No result was produced. Retry the request or inspect /status."),
         "tool_execution_failed" => ("Tool failed", "The current work is incomplete. Inspect the tool result and give corrected instructions."),
+        "report_scope_conflict" => ("Report scope needs clarification", "A proposed tool was not proven read-only and was not executed. Clarify the permitted scope before continuing."),
+        "repeated_tool_no_progress" => ("No new progress", "Repeated calls returned unchanged evidence after recovery. Gathered observations are saved; request a partial report or the next missing inspection."),
         "repeated_tool_failure" => ("Repeated tool failure", "The run stopped after unchanged failures. Inspect the last tool result before retrying."),
         "blocked_step_unresolved" => ("Plan step blocked", "The step could not be verified as complete. Inspect /status and resolve its blocker."),
         "required_verification_unresolved" => ("Verification incomplete", "Required evidence is missing, failed, or stale. Inspect /status and run or repair the exact check."),

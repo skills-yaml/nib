@@ -541,6 +541,8 @@ fn terminal_outcomes_explain_the_next_action() {
     for outcome in [
         "tool_execution_failed",
         "repeated_tool_failure",
+        "repeated_tool_no_progress",
+        "report_scope_conflict",
         "required_verification_unresolved",
         "turn_limit_reached",
         "waiting_for_user_input",
