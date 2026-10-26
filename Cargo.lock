@@ -1253,7 +1253,7 @@ dependencies = [
 
 [[package]]
 name = "nib"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "aho-corasick",
  "async-trait",

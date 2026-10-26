@@ -512,6 +512,33 @@ fn selected_transcript_block_is_kept_inside_the_row_viewport() {
 }
 
 #[test]
+fn selected_block_taller_than_the_page_does_not_flicker() {
+    let owners = vec![0; 30];
+    let mut pinned = TranscriptViewport::default();
+    pinned.observe_layout(owners.len(), 10);
+    assert_eq!(pinned.top_row(), 20);
+    assert!(pinned.is_pinned_to_tail());
+
+    ensure_selected_visible(&mut pinned, &owners, 0);
+    assert_eq!(pinned.top_row(), 20);
+    assert!(pinned.is_pinned_to_tail());
+    ensure_selected_visible(&mut pinned, &owners, 0);
+    assert_eq!(pinned.top_row(), 20);
+    assert!(pinned.is_pinned_to_tail());
+
+    let mut above = TranscriptViewport::default();
+    above.observe_layout(40, 8);
+    above.apply(TranscriptViewportAction::JumpToStart);
+    let mut split = vec![0; 20];
+    split.extend(vec![1; 20]);
+    ensure_selected_visible(&mut above, &split, 1);
+    assert_eq!(above.top_row(), 20);
+    assert!(!above.is_pinned_to_tail());
+    ensure_selected_visible(&mut above, &split, 1);
+    assert_eq!(above.top_row(), 20);
+}
+
+#[test]
 fn empty_session_invites_a_conversation_and_keeps_the_prompt_visible() {
     let backend = TestBackend::new(100, 24);
     let mut terminal = Terminal::new(backend).expect("test terminal");

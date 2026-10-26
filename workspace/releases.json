@@ -235,6 +235,21 @@
         "workspace/specs/test/agent-runtime/T090_tool_history_and_status_recovery.md"
       ],
       "evidence": "User authorized implementation on 2026-10-26. Public development manifest binds published 0.7.0 to b766d62. Peer runtime refuses an uninitialized ownership board; preserve it and use established single-author ledger fallback. Fresh patch 0.7.1 is applied once by t090-author; no integration or publication inferred. Confirmed shared development merge ea889aea84358da0cded4bf129fe7e028917c479 via PR78 on 2026-10-26T11:30:52Z, pinned to reviewed and native/hosted-qualified head 96a2e07 with matching trees. T090 moves to test without a second version application. Main delivery and publication are separate. Publication observed 2026-10-26: successful Release Artifacts run 40315639494 completed at 11:42:53Z and development-latest/nib-release.json binds 0.7.1 to ea889aea84358da0cded4bf129fe7e028917c479. Close this published reservation to new implementation members; future runtime changes require a fresh target. This observed event does not establish publication of later documentation commits."
+    },
+    {
+      "id": "nib-tall-selection",
+      "component": "nib",
+      "baseline": "0.7.1",
+      "target": "0.7.2",
+      "impact": "patch",
+      "timing": "development-start",
+      "status": "applied",
+      "owner": "t091-selection",
+      "version_source": "Cargo.toml",
+      "specs": [
+        "workspace/specs/development/interactive/T091_stable_tall_transcript_selection.md"
+      ],
+      "evidence": "User reported transcript flicker on 2026-10-26 when selecting a row after the chat grew past one page. Published development 0.7.1 belongs to T090 and is closed, so the occupied 0.7.1 target is reconciled to fresh patch 0.7.2 from that baseline. Owner t091-selection applies Cargo.toml, Cargo.lock, and the skills.yaml project version once before integration. Application is not integration, main delivery, or publication."
     }
   ]
 }
