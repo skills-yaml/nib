@@ -220,6 +220,21 @@
         "workspace/specs/test/architecture/T089_long_lived_store_reresolve.md"
       ],
       "evidence": "User-authorized configured-provider selection correction on 2026-10-25. Public development-latest manifest reports 0.6.0 at 89156f697350f4baf77de9dfb6d5838dc77272fd. Peer runtime status refuses an uninitialized board; existing worktrees and ownership are preserved, following the established single-author ledger reservation fallback. Fresh minor 0.7.0 is reserved here and applied once by t088-model-picker to native mirrors at development start. No integration, main delivery or publication inferred. Independent review identified the publicly exported ModelSelection.available change as source-incompatible; the same unreleased reservation is corrected to minor 0.7.0 before integration artifacts. Confirmed shared development merge at 76ed1bffe49769965a7ced6471aa884437e1437e via PR76 on 2026-10-25T13:21:55Z, pinned to independently reviewed and native/hosted-qualified head 0d06470 with identical trees. T088 moves to test without a second version application. Main delivery and publication remain separate and unverified. T089 joins this applied 0.7.0 target on 2026-10-25 as a patch member. Confirmed shared development merge at f2f0544e18cce06bf9ec7af6d2b2b62e6cffd715 via PR77 on 2026-10-25T17:07:25Z, pinned to reviewed head e3b74ad0dd1c57bd4b33f80a523cf10e0bbd7a2c. T089 moves to test without a second bump. Main delivery and publication remain separate. Publication reconciliation on 2026-10-25: development 0.7.0 was already published at 76ed1bffe49769965a7ced6471aa884437e1437e (successful artifact run 40197272966, completed 13:36:04Z), and at 0677c56adf1eb60edae8f160dd4b9d5d430caffe (successful artifact run 40198975880, completed 14:00:03Z), before PR77 merged T089 at 17:07:25Z. Therefore the prior statement that an applied-but-unreleased target remained available for T089 at integration was stale: that late join crossed the published-version boundary and is not retroactively approved by this record. The later successful artifact run 40214934850 completed 17:22:47Z, and the public development-latest manifest now binds 0.7.0 to f2f0544e18cce06bf9ec7af6d2b2b62e6cffd715, which includes T088 and T089. Retain that actual published membership and close the reservation; no new runtime version is invented for this documentation-only correction. Future runtime changes require a fresh reservation. Main delivery and production publication remain separate."
+    },
+    {
+      "id": "nib-tall-selection",
+      "component": "nib",
+      "baseline": "0.7.0",
+      "target": "0.7.1",
+      "impact": "patch",
+      "timing": "development-start",
+      "status": "applied",
+      "owner": "t091-selection",
+      "version_source": "Cargo.toml",
+      "specs": [
+        "workspace/specs/development/interactive/T091_stable_tall_transcript_selection.md"
+      ],
+      "evidence": "User reported transcript flicker on 2026-10-26 when selecting a row after the chat grew past one page. Published development 0.7.0 cannot be reused, so patch 0.7.1 is reserved from it. Owner t091-selection applied Cargo.toml, Cargo.lock, and the skills.yaml project version once at development start. Application is not integration, main delivery, or publication."
     }
   ]
 }

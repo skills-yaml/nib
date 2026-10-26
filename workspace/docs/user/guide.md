@@ -1126,7 +1126,10 @@ is available) without a `thought` label. Left/Right expands it. Speech follows C
 style: a short preamble before tools that says what it is about to do and why,
 then a concise final answer. Speech renders markdown, including headings, lists,
 emphasis, inline code, and fenced code with lightweight syntax coloring.
-`Left`/`Right` expand or fold the selected block. `Tab` moves focus between the
+`Left`/`Right` expand or fold the selected block. Selecting a block scrolls
+only far enough to bring it on screen. A block taller than the page stays put
+when any of it is already visible, and otherwise opens at its first row, so the
+view does not jump between the two ends. `Tab` moves focus between the
 composer and the transcript. Click in the chat to focus it; drag to select text.
 Releasing the drag copies the selection and clears the highlight. `Esc` or
 `Enter` also clears a leftover selection and returns to the composer; a click

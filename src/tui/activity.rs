@@ -378,6 +378,17 @@ pub(crate) fn ensure_selected_visible(
     let page = viewport.page_rows().max(1);
     let top = viewport.top_row();
     let bottom = top.saturating_add(page.saturating_sub(1));
+    let span = last.saturating_sub(first).saturating_add(1);
+    // A block taller than the page cannot show both ends. Chasing the hidden
+    // end on the next redraw alternates the viewport while the row stays
+    // selected, which flickers once the transcript is scrollable.
+    if span > page {
+        let overlaps = last >= top && first <= bottom;
+        if !overlaps {
+            viewport.reveal_row(first);
+        }
+        return;
+    }
     if first < top {
         viewport.reveal_row(first);
     } else if last > bottom {
