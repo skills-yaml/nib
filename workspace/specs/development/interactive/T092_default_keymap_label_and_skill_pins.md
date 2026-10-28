@@ -15,9 +15,9 @@ No governed instruction edits.
 
 ## Acceptance Criteria
 
-- [ ] AC-1: Startup and contextual hints display Default for the Codex preset.
-- [ ] AC-2: Legacy hints and configured bindings retain their behavior.
-- [ ] AC-3: All 20 direct skill pins agree with the lockfile; its additional
+- [x] AC-1: Startup and contextual hints display Default for the Codex preset.
+- [x] AC-2: Legacy hints and configured bindings retain their behavior.
+- [x] AC-3: All 20 direct skill pins agree with the lockfile; its additional
   design-domain-model entry remains a transitive dependency.
 - [ ] AC-4: Native mirrors agree on the single reserved patch and required gates pass.
 
@@ -42,6 +42,13 @@ Check manifest/lock agreement, task test:interactive, task docs:check,
 task versions:check, independent exact-candidate review, and frozen task verify.
 No paid provider calls. Configuration serialization and bindings are unchanged.
 
+## Risks and Compatibility
+
+The visible Default label differs from the persisted codex token. The user guide
+states that distinction; keymap command syntax and stored configuration remain
+compatible. Skill upgrades affect developer workflows, so manifest and lock pins
+are checked together. Reverting the label and pins requires no data migration.
+
 ## Version Impact
 
 | Component | Impact | Release | Rationale |
@@ -64,5 +71,9 @@ confirmed 0.7.2 at 91a37883ecdbecc52158629777819839bac4080c.
 Manifest/lock comparison passed for all 20 direct skills; the lock contains 21
 entries including the transitive design-domain-model dependency. Existing startup
 and footer tests cover AC-1, the Legacy label regression and existing override
-checks cover AC-2. Focused and full gate results remain pending; no integration,
-main delivery or publication is claimed.
+checks cover AC-2. Native task test:interactive passed, including the SIGINT
+subprocess test that timed out inside the sandbox. task docs:check and
+versions:check passed. Independent exact review of e118c9e approved the candidate
+subject to gates; a subsequent required Risks and Compatibility section repairs
+the development-spec documentation gate. Frozen task verify remains required
+before integration. No integration, main delivery or publication is claimed.
