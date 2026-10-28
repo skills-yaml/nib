@@ -887,7 +887,8 @@ next-turn queue rule; `/help` remains available for immediate command discovery.
 
 ### Keymap presets and customization
 
-The default TUI preset is `codex`. Use `/keymap` to inspect effective bindings,
+The default TUI preset is `codex`, displayed as `Default` in startup and footer
+hints. Use `/keymap` to inspect effective bindings,
 `/keymap preset legacy` to restore the previous nib controls, or
 `/keymap preset codex` to return. Legacy Enter queues, Tab switches transcript focus,
 Ctrl+A selects chat, Ctrl+C never quits, and double Esc only clears a nonempty draft.

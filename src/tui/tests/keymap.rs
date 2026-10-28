@@ -299,7 +299,10 @@ fn footer_hints_follow_context_modal_ownership_and_overrides() {
         InteractionLayer::HistorySearch,
         InteractionLayer::Model,
     ] {
-        assert_eq!(hint(&map, layer, TuiFocus::Composer, true, false), "Codex");
+        assert_eq!(
+            hint(&map, layer, TuiFocus::Composer, true, false),
+            "Default"
+        );
     }
     assert_eq!(
         hint(
@@ -309,7 +312,7 @@ fn footer_hints_follow_context_modal_ownership_and_overrides() {
             true,
             true
         ),
-        "Codex"
+        "Default"
     );
     map.keymap
         .entry("running".into())
@@ -329,4 +332,20 @@ fn footer_hints_follow_context_modal_ownership_and_overrides() {
     assert!(custom.contains("Ctrl+X steer"));
     assert!(!custom.contains("Enter"));
     assert!(!custom.contains("queue"));
+}
+
+#[test]
+fn legacy_preset_keeps_its_display_label() {
+    let map = crate::config::keymap::TuiConfig {
+        preset: crate::config::keymap::KeymapPreset::Legacy,
+        ..Default::default()
+    };
+    let hint = crate::tui::chrome::keymap_context_hint(
+        &map,
+        InteractionLayer::Approval,
+        TuiFocus::Composer,
+        false,
+        false,
+    );
+    assert_eq!(hint, "Legacy");
 }

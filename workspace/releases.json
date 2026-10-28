@@ -243,13 +243,28 @@
       "target": "0.7.2",
       "impact": "patch",
       "timing": "development-start",
-      "status": "applied",
+      "status": "released",
       "owner": "t091-selection",
       "version_source": "Cargo.toml",
       "specs": [
         "workspace/specs/test/interactive/T091_stable_tall_transcript_selection.md"
       ],
-      "evidence": "User reported transcript flicker on 2026-10-26 when selecting a row after the chat grew past one page. Published development 0.7.1 belongs to T090 and is closed, so the occupied 0.7.1 target is reconciled to fresh patch 0.7.2 from that baseline. Owner t091-selection applies Cargo.toml, Cargo.lock, and the skills.yaml project version once before integration. Application is not integration, main delivery, or publication. Confirmed shared development merge 18705e72e9c8b6f8dc341205e929a20feded1f05 via PR80 on 2026-10-26T15:50:03Z, pinned to branch tip e657398625ba8fc94a50c3b1cd860007462be239 with identical trees. T091 moves to test without a second version application. Main delivery and publication remain separate and unverified."
+      "evidence": "User reported transcript flicker on 2026-10-26 when selecting a row after the chat grew past one page. Published development 0.7.1 belongs to T090 and is closed, so the occupied 0.7.1 target is reconciled to fresh patch 0.7.2 from that baseline. Owner t091-selection applies Cargo.toml, Cargo.lock, and the skills.yaml project version once before integration. Application is not integration, main delivery, or publication. Confirmed shared development merge 18705e72e9c8b6f8dc341205e929a20feded1f05 via PR80 on 2026-10-26T15:50:03Z, pinned to branch tip e657398625ba8fc94a50c3b1cd860007462be239 with identical trees. T091 moves to test without a second version application. Main delivery and publication remain separate and unverified. Publication observed 2026-10-28: public development-latest/nib-release.json binds 0.7.2 to 91a37883ecdbecc52158629777819839bac4080c. Close this reservation to new implementation members."
+    },
+    {
+      "id": "nib-default-keymap-label",
+      "component": "nib",
+      "baseline": "0.7.2",
+      "target": "0.7.3",
+      "impact": "patch",
+      "timing": "development-start",
+      "status": "applied",
+      "owner": "t092-author",
+      "version_source": "Cargo.toml",
+      "specs": [
+        "workspace/specs/development/interactive/T092_default_keymap_label_and_skill_pins.md"
+      ],
+      "evidence": "User authorized merging the existing skill-pin and keymap-label edits on 2026-10-28. Public development manifest binds released 0.7.2 to 91a3788. Runtime status refuses an uninitialized board; preserve ownership state and use the established single-author ledger fallback, prospectively independently reviewed. Fresh patch 0.7.3 applied once by t092-author to Cargo.toml, Cargo.lock and skills.yaml before integration artifacts. No integration, main delivery or publication inferred."
     }
   ]
 }

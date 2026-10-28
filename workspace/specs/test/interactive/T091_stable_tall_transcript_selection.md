@@ -108,7 +108,9 @@ PR [#80](https://github.com/skills-yaml/nib/pull/80) merged into `development` a
 `18705e72e9c8b6f8dc341205e929a20feded1f05` on 2026-10-26T15:50:03Z. The merged
 tree matches branch tip `e657398625ba8fc94a50c3b1cd860007462be239`. This record
 moves T091 to `test` and applies no second version bump. Patch 0.7.2 stays
-applied. Main delivery and publication remain separate and unverified.
+applied. Main delivery remains separate and unverified. Development publication was
+verified on 2026-10-28: the public development-latest/nib-release.json manifest
+binds 0.7.2 to 91a37883ecdbecc52158629777819839bac4080c.
 
 AC-1 and AC-2 are the repeated-reveal cases in
 `selected_block_taller_than_the_page_does_not_flicker`. AC-3 is
