@@ -262,9 +262,9 @@
       "owner": "t092-author",
       "version_source": "Cargo.toml",
       "specs": [
-        "workspace/specs/development/interactive/T092_default_keymap_label_and_skill_pins.md"
+        "workspace/specs/test/interactive/T092_default_keymap_label_and_skill_pins.md"
       ],
-      "evidence": "User authorized merging the existing skill-pin and keymap-label edits on 2026-10-28. Public development manifest binds released 0.7.2 to 91a3788. Runtime status refuses an uninitialized board; preserve ownership state and use the established single-author ledger fallback, prospectively independently reviewed. Fresh patch 0.7.3 applied once by t092-author to Cargo.toml, Cargo.lock and skills.yaml before integration artifacts. No integration, main delivery or publication inferred."
+      "evidence": "User authorized merging the existing skill-pin and keymap-label edits on 2026-10-28. Public development manifest binds released 0.7.2 to 91a3788. Runtime status refuses an uninitialized board; preserve ownership state and use the established single-author ledger fallback, prospectively independently reviewed. Fresh patch 0.7.3 applied once by t092-author to Cargo.toml, Cargo.lock and skills.yaml before integration artifacts. No integration, main delivery or publication inferred. Confirmed development merge 52ce663c8c0079faf26611781932a3fc9a13120c via PR81 at 2026-10-28T08:33:44Z, pinned to independently reviewed head 3493e195ef4dec2d45c2d99968e28e5a54655ed8 with matching trees after full native task verify and successful Linux/macOS CI 40653386289. T092 moves to test without another bump. Main delivery and publication remain separate."
     }
   ]
 }

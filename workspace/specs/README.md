@@ -33,7 +33,7 @@ new work requires verified main merge. See [SDLC](../instructions/tech/sdlc.md).
 <!-- SPEC-CATALOG:START -->
 | Spec | Primary feature | State | Status rationale |
 | --- | --- | --- | --- |
-| [T092](development/interactive/T092_default_keymap_label_and_skill_pins.md) | interactive | development | User-approved skill pin refresh and Default keymap display correction; validation and shared integration pending. |
+| [T092](test/interactive/T092_default_keymap_label_and_skill_pins.md) | interactive | test | Confirmed development merge 52ce663 via PR81 on 2026-10-28 after independent review, full native verification and Linux/macOS CI; patch 0.7.3 applied once; main delivery and publication separate. |
 | [T091](test/interactive/T091_stable_tall_transcript_selection.md) | interactive | test | Confirmed development merge 18705e72 via PR80 on 2026-10-26T15:50:03Z, pinned to branch tip e657398 with an identical tree; patch 0.7.2 applied once; development publication verified at 91a3788 by manifest observed 2026-10-28; main delivery remains unverified. |
 | [T089](test/architecture/T089_long_lived_store_reresolve.md) | architecture | test | Confirmed shared development merge f2f0544 via PR77 on 2026-10-25T17:07:25Z, pinned to reviewed head e3b74ad; historical member of published development 0.7.0 at f2f0544; late-join publication mismatch is reconciled in the spec and ledger; main delivery and production publication remain separate. |
 | [T087](test/build-quality/T087_dead_code_and_test_cleanup.md) | build-quality | test | Confirmed shared development merge 89156f6 via PR71 (pinned to reviewed d3dc959) on 2026-10-25 after full task verify and Linux/macOS CI; shared minor 0.6.0; main delivery and publication remain separate. |
@@ -157,7 +157,7 @@ and Linux/macOS/Windows CI 37419726793 passed on that exact revision. Question
 forms, conversational recovery, Esc interruption and proposal chat are delivered;
 `/plan` and `/questions` are removed from interactive commands. See
 [T061](done/interactive/T061_question_form.md) for criterion evidence and actual events.
-Current catalog: **78 done, 19 test, 2 development, and 0 backlog**. Publication is separate.
+Current catalog: **78 done, 20 test, 1 development, and 0 backlog**. Publication is separate.
 
 The 2026-07-15 audit inspected all 27 specs that had claimed completion. Unsupported
 claims moved through `development/`; missing feasible behavior was implemented and

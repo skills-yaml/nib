@@ -1,6 +1,6 @@
 # T092: Default Keymap Label and Workspace Skill Pins
 
-State: development
+State: test
 Primary Feature: interactive
 
 ## Scope
@@ -19,7 +19,7 @@ No governed instruction edits.
 - [x] AC-2: Legacy hints and configured bindings retain their behavior.
 - [x] AC-3: All 20 direct skill pins agree with the lockfile; its additional
   design-domain-model entry remains a transitive dependency.
-- [ ] AC-4: Native mirrors agree on the single reserved patch and required gates pass.
+- [x] AC-4: Native mirrors agree on the single reserved patch and required gates pass.
 
 ## Affected Areas
 
@@ -74,6 +74,23 @@ and footer tests cover AC-1, the Legacy label regression and existing override
 checks cover AC-2. Native task test:interactive passed, including the SIGINT
 subprocess test that timed out inside the sandbox. task docs:check and
 versions:check passed. Independent exact review of e118c9e approved the candidate
-subject to gates; a subsequent required Risks and Compatibility section repairs
-the development-spec documentation gate. Frozen task verify remains required
-before integration. No integration, main delivery or publication is claimed.
+subject to gates. Final independent exact review approved 3493e19 after the
+compatibility section and focused-result reconciliation. Frozen task verify
+passed all static checks and 2,138 tests. Hosted CI 40653386289 passed Linux
+validation (including coverage, release qualification and terminal/process smokes)
+and macOS tests/qualification on the PR candidate. Windows is excluded from this
+repository's development-target CI and is not claimed passed.
+
+## Integration Evidence
+
+Revision: 52ce663c8c0079faf26611781932a3fc9a13120c
+Outcome: passed
+
+PR [#81](https://github.com/skills-yaml/nib/pull/81) merged into shared
+`development` at 52ce663c8c0079faf26611781932a3fc9a13120c on
+2026-10-28T08:33:44Z, pinned to independently reviewed head
+3493e195ef4dec2d45c2d99968e28e5a54655ed8. The merge tree matches that head;
+the local checkout fast-forwarded to the confirmed remote merge. This moves T092
+to test and applies no second version bump. Main delivery and 0.7.3 publication
+remain separate; neither is inferred here. The integration-record revision receives
+fresh native documentation/version checks and full task verify before handoff.
