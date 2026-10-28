@@ -642,7 +642,10 @@ pub(crate) fn empty_state_lines(welcome: &StartupWelcome, no_color: bool) -> Vec
         Line::from(""),
         Line::from(Span::styled("Keys", title)),
         Line::from(Span::styled(
-            format!("Keymap {:?} · /keymap to customize", welcome.keymap.preset),
+            format!(
+                "Keymap {} · /keymap to customize",
+                keymap_preset_label(welcome.keymap.preset)
+            ),
             muted,
         )),
         Line::from(Span::styled(
@@ -854,6 +857,13 @@ pub(crate) fn waiting_meter_text(meter: &WaitingMeter, width: usize, no_color: b
     truncate_display_cells(&format!("{spin} {short}…"), width)
 }
 
+fn keymap_preset_label(preset: crate::config::keymap::KeymapPreset) -> &'static str {
+    match preset {
+        crate::config::keymap::KeymapPreset::Codex => "Default",
+        crate::config::keymap::KeymapPreset::Legacy => "Legacy",
+    }
+}
+
 /// Advertise only actions owned by the currently visible interaction context.
 pub(crate) fn keymap_context_hint(
     keymap: &crate::config::keymap::TuiConfig,
@@ -862,7 +872,7 @@ pub(crate) fn keymap_context_hint(
     running: bool,
     workspace_consent: bool,
 ) -> String {
-    let mut hints = vec![format!("{:?}", keymap.preset)];
+    let mut hints = vec![keymap_preset_label(keymap.preset).to_string()];
     if workspace_consent || !matches!(layer, InteractionLayer::Composer) {
         return hints.join(" · ");
     }

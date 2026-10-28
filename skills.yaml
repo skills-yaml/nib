@@ -1,5 +1,5 @@
 name: nib
-version: 0.7.2
+version: 0.7.3
 registries:
   default: git@github.com:skills-yaml/registry.git
 agents:

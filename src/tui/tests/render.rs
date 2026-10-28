@@ -572,7 +572,7 @@ fn empty_session_invites_a_conversation_and_keeps_the_prompt_visible() {
     assert!(rendered.contains("work in a separate Git worktree"));
     assert!(rendered.contains("/session"));
     assert!(rendered.contains("Ctrl+C"));
-    assert!(rendered.contains("Keymap Codex"));
+    assert!(rendered.contains("Keymap Default"));
     assert!(rendered.contains("> Ask nib anything…"));
     assert!(rendered.contains("mode ask"));
     assert!(rendered.contains("idle"));
