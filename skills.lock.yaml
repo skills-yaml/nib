@@ -9,64 +9,67 @@ agents:
 - hermes
 skills:
 - name: workspace/address-review-feedback
-  version: 0.4.1
+  version: 0.4.5
   source: default
 - name: workspace/adopt-workspace-structure
-  version: 0.6.1
+  version: 0.8.0
   source: default
 - name: workspace/analyze-repository
-  version: 0.3.1
+  version: 0.4.1
   source: default
 - name: workspace/coordinate-multi-agent-development
-  version: 0.2.1
+  version: 0.2.5
+  source: default
+- name: workspace/design-domain-model
+  version: 0.1.1
   source: default
 - name: workspace/fix-bug
-  version: 0.4.1
+  version: 0.4.5
   source: default
 - name: workspace/fix-ci
-  version: 0.4.1
+  version: 0.4.5
   source: default
 - name: workspace/implement-spec
-  version: 0.4.1
+  version: 0.5.1
   source: default
 - name: workspace/maintain-project-docs
-  version: 0.3.1
+  version: 0.3.5
   source: default
 - name: workspace/monitor-ci
-  version: 0.4.1
+  version: 0.4.5
   source: default
 - name: workspace/plan-implementation
-  version: 0.4.1
+  version: 0.5.1
   source: default
 - name: workspace/review-changes
-  version: 0.4.1
+  version: 0.5.1
   source: default
 - name: workspace/review-security
-  version: 0.4.1
+  version: 0.5.1
   source: default
 - name: workspace/wk-adopt
-  version: 0.3.1
+  version: 0.4.0
   source: default
 - name: workspace/wk-analyze
-  version: 0.3.1
+  version: 0.4.1
   source: default
 - name: workspace/wk-deliver
-  version: 0.3.1
+  version: 0.4.1
   source: default
 - name: workspace/wk-document
-  version: 0.3.1
+  version: 0.3.5
   source: default
 - name: workspace/wk-plan
-  version: 0.3.1
+  version: 0.4.1
   source: default
 - name: workspace/wk-review
-  version: 0.3.1
+  version: 0.4.1
   source: default
 - name: workspace/wk-spec
-  version: 0.3.1
+  version: 0.4.1
   source: default
 - name: workspace/write-spec
-  version: 0.4.1
+  version: 0.5.1
   source: default
 outputs:
 - path: .agents/skills/address-review-feedback
@@ -83,6 +86,10 @@ outputs:
   - codex
 - path: .agents/skills/coordinate-multi-agent-development
   skill: workspace/coordinate-multi-agent-development
+  agents:
+  - codex
+- path: .agents/skills/design-domain-model
+  skill: workspace/design-domain-model
   agents:
   - codex
 - path: .agents/skills/fix-bug
@@ -165,6 +172,10 @@ outputs:
   skill: workspace/coordinate-multi-agent-development
   agents:
   - claude
+- path: .claude/skills/design-domain-model
+  skill: workspace/design-domain-model
+  agents:
+  - claude
 - path: .claude/skills/fix-bug
   skill: workspace/fix-bug
   agents:
@@ -245,6 +256,10 @@ outputs:
   skill: workspace/coordinate-multi-agent-development
   agents:
   - cursor
+- path: .cursor/skills/design-domain-model
+  skill: workspace/design-domain-model
+  agents:
+  - cursor
 - path: .cursor/skills/fix-bug
   skill: workspace/fix-bug
   agents:
@@ -323,6 +338,10 @@ outputs:
   - grok
 - path: .grok/skills/coordinate-multi-agent-development
   skill: workspace/coordinate-multi-agent-development
+  agents:
+  - grok
+- path: .grok/skills/design-domain-model
+  skill: workspace/design-domain-model
   agents:
   - grok
 - path: .grok/skills/fix-bug
