@@ -1504,7 +1504,7 @@ exist.
 
 | Component | Impact | Release | Rationale |
 | --- | --- | --- | --- |
-| nib | none | none | Remaining live qualification records evidence only; future shipped-code fixes must reserve their own impact before implementation. |
+| nib | none | none | Qualification-only diagnostics, tests and evidence records do not change the shipped binary; future shipped-code fixes must reserve their own impact before implementation. |
 
 ## Memory Impact
 
@@ -1553,3 +1553,39 @@ pending-run ownership, establish approved account/spend limits, review catalog
 and offline budget planning, then authorize bounded canary/selected/full runs.
 The workflow has provider/mode inputs, not a separate dry-run mode. No provider
 calls or paid qualification were performed by this audit; live criteria remain open.
+
+
+## 2026-10-26 Diagnostic Preparation Slice
+
+Run proposal: [bounded diagnostic runs](../../../docs/work/t023-diagnostic-run-proposal.md).
+
+Scope: add a typed, content-free failure phase to tool-scenario reports, preserve
+seven-day hosted artifact retention, and prepare a bounded diagnostic run proposal.
+No production adapter, model selection, prompt, acceptance threshold, provider
+setting or paid-run authority changes in this slice.
+
+Acceptance for this slice:
+
+- Tool failures distinguish initial request/validation, tool-result construction,
+  and continuation request/validation, including rejection before request admission.
+- Successful and unexecuted scenarios carry no failure phase. The additive schema-2
+  field is bounded by an enum and cannot contain provider content.
+- Offline tests verify phase serialization, success omission and report validation;
+  privacy scanning and existing accounting remain authoritative.
+- The run proposal fixes models, mode, ceilings, source-identity requirements and
+  evidence preservation before any paid dispatch. Unknown prices require confirmed
+  provider-side hard caps; no configured ceiling implies approval.
+
+Implementation order: report/scenario diagnostics and focused offline tests; run
+proposal and catalog/memory reconciliation; independent exact-candidate review;
+freeze and task verify plus task docs:check and task versions:check; reviewed PR.
+T023 remains development while live qualification is unresolved. A later production
+repair requires causal evidence, regression coverage and its own version impact.
+
+
+The diagnostic preparation slice records its durable boundary in
+[decisions](../../../agents/memory/decisions.md) and
+[changelog](../../../agents/memory/changelog.md): Memory Impact updated for this
+bounded slice. Overall qualification memory remains pending until its live outcome
+is known. Focused offline validation passes 74 tests with the paid entrypoint ignored.
+No provider requests or protected configuration changes were made.

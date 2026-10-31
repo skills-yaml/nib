@@ -2,7 +2,7 @@ use super::config::LiveSettings;
 use super::plan::RunPlan;
 use super::report::{
     self, ProfileReport, ProviderReport, ReportPrivacyKey, ScenarioNotApplicableEvidence,
-    ScenarioReport,
+    ScenarioReport, ToolFailurePhase,
 };
 use super::{
     CatalogSnapshot, Classification, LlmTerminalStatus, ModelProfile, ScenarioId, TransportId,
@@ -421,6 +421,7 @@ impl From<LlmError> for ScenarioFailure {
 
 #[derive(Debug)]
 struct ScenarioEvidence {
+    tool_phase: Option<ToolFailurePhase>,
     actual_logical_requests: usize,
     actual_attempts: Option<usize>,
     usage_requests: usize,
@@ -431,6 +432,7 @@ struct ScenarioEvidence {
 impl ScenarioEvidence {
     fn new() -> Self {
         Self {
+            tool_phase: None,
             actual_logical_requests: 0,
             actual_attempts: Some(0),
             usage_requests: 0,
@@ -530,6 +532,7 @@ impl ScenarioEvidence {
             }
         };
         ScenarioReport {
+            tool_failure_phase: if passed { None } else { self.tool_phase },
             scenario,
             passed,
             duration_ms,
@@ -549,6 +552,7 @@ impl ScenarioEvidence {
 
     fn not_executed_unsupported(scenario: ScenarioId) -> ScenarioReport {
         ScenarioReport {
+            tool_failure_phase: None,
             scenario,
             passed: false,
             duration_ms: 0,
@@ -1052,6 +1056,7 @@ async fn tool_continuation(
 ) -> ScenarioExecution {
     let mut context = ScenarioContext::new(budget, profile.model.pricing.as_ref());
     let result = async {
+    context.evidence.tool_phase = Some(ToolFailurePhase::InitialRequest);
     let first_nonce = nonce("tool-a");
     let second_nonce = nonce("tool-b");
     let receipt = nonce("receipt");
@@ -1130,6 +1135,7 @@ async fn tool_continuation(
             ));
         }
     }
+    context.evidence.tool_phase = Some(ToolFailurePhase::ToolResult);
     let mut continuation = response.continuation.ok_or_else(|| {
         ScenarioFailure::harness(
             HarnessFailureCode::ToolCorrelation,
@@ -1146,6 +1152,7 @@ async fn tool_continuation(
             ScenarioFailure::harness(HarnessFailureCode::ToolCorrelation, error)
         })?;
     }
+    context.evidence.tool_phase = Some(ToolFailurePhase::Continuation);
     let final_response = context
         .complete(client,
             live_request(&messages, Some(&tools), scope, settings)
@@ -1338,7 +1345,7 @@ mod tests {
     use nib::llm::{LlmErrorMetadata, RetryDisposition};
     use std::path::PathBuf;
 
-    fn settings() -> LiveSettings {
+    pub(super) fn settings() -> LiveSettings {
         LiveSettings {
             mode: super::super::LiveMode::Canary,
             providers: vec!["openai".to_string()],
@@ -1597,6 +1604,42 @@ mod tests {
     }
 
     #[test]
+    fn tool_failure_phase_is_content_free_and_absent_on_success() {
+        for (phase, serialized, requests) in [
+            (ToolFailurePhase::InitialRequest, "initial_request", 0),
+            (ToolFailurePhase::ToolResult, "tool_result", 1),
+            (ToolFailurePhase::Continuation, "continuation", 1),
+            (ToolFailurePhase::Continuation, "continuation", 2),
+        ] {
+            let mut evidence = ScenarioEvidence::new();
+            evidence.tool_phase = Some(phase);
+            for _ in 0..requests {
+                evidence.begin_request().unwrap();
+                evidence.record_result(Some(1), None).unwrap();
+            }
+            let failure = ScenarioFailure::harness(
+                HarnessFailureCode::ResponseRefused,
+                "PRIVATE_PROVIDER_CONTENT",
+            );
+            let report = evidence.report(ScenarioId::SingleToolContinuation, 1, None, Err(failure));
+            let json = serde_json::to_value(&report).unwrap();
+            assert_eq!(json["tool_failure_phase"], serialized);
+            assert_eq!(json["safe_error_class"], "response_refused");
+            assert_eq!(json["actual_logical_requests"], requests);
+            assert!(!json.to_string().contains("PRIVATE_PROVIDER_CONTENT"));
+        }
+        let mut evidence = ScenarioEvidence::new();
+        evidence.tool_phase = Some(ToolFailurePhase::Continuation);
+        let report = evidence.report(ScenarioId::SingleToolContinuation, 1, None, Ok(()));
+        assert!(serde_json::to_value(report)
+            .unwrap()
+            .get("tool_failure_phase")
+            .is_none());
+        let report = ScenarioEvidence::not_executed_unsupported(ScenarioId::SingleToolContinuation);
+        assert!(report.tool_failure_phase.is_none());
+    }
+
+    #[test]
     fn scenario_evidence_aggregates_two_requests_attempts_usage_and_cost() {
         let mut evidence = ScenarioEvidence::new();
         evidence.begin_request().unwrap();
@@ -1810,3 +1853,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "scenario_phase_tests.rs"]
+mod phase_tests;

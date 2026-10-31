@@ -989,3 +989,23 @@ used only one tool batch, so T090's third-request history loss does not explain 
 Secret-name presence and configured budgets do not establish spend authority;
 paid qualification requires the protected approvals and retained exact-revision
 reports. No paid provider requests were made by this work.
+
+
+## 2026-10-26 - T023 diagnostic preparation boundary
+
+- Type: decision
+- Source: user-authorized T023 fix preparation
+- Confidence: high
+- Review: independent exact-candidate review and offline verification required
+- Supersedes: none
+
+Content:
+
+Live qualification reports distinguish initial tool request/validation, tool-result
+construction, and continuation request/validation through a bounded enum, without
+recording provider content. Hosted retention remains seven days; preserve a sanitized
+source-bound evidence summary before expiry. The first proposed paid diagnostic uses
+selected claude-opus-5; a later canary uses the independently configured default.
+The proposed USD 2 combined ceiling is not spending approval. Protected configuration,
+account hard caps and explicit user spending authority remain prerequisites. This
+qualification-only slice changes no shipped adapter and establishes no live pass.
