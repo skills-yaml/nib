@@ -9,67 +9,67 @@ agents:
 - hermes
 skills:
 - name: workspace/address-review-feedback
-  version: 0.4.5
+  version: 0.4.9
   source: default
 - name: workspace/adopt-workspace-structure
-  version: 0.8.0
+  version: 0.11.1
   source: default
 - name: workspace/analyze-repository
-  version: 0.4.1
+  version: 0.4.5
   source: default
 - name: workspace/coordinate-multi-agent-development
-  version: 0.2.5
+  version: 0.2.9
   source: default
 - name: workspace/design-domain-model
-  version: 0.1.1
+  version: 0.1.5
   source: default
 - name: workspace/fix-bug
-  version: 0.4.5
+  version: 0.4.9
   source: default
 - name: workspace/fix-ci
-  version: 0.4.5
+  version: 0.4.9
   source: default
 - name: workspace/implement-spec
-  version: 0.5.1
+  version: 0.5.5
   source: default
 - name: workspace/maintain-project-docs
-  version: 0.3.5
+  version: 0.3.9
   source: default
 - name: workspace/monitor-ci
-  version: 0.4.5
+  version: 0.4.9
   source: default
 - name: workspace/plan-implementation
-  version: 0.5.1
+  version: 0.5.5
   source: default
 - name: workspace/review-changes
-  version: 0.5.1
+  version: 0.5.5
   source: default
 - name: workspace/review-security
-  version: 0.5.1
+  version: 0.5.5
   source: default
 - name: workspace/wk-adopt
-  version: 0.4.0
+  version: 0.4.4
   source: default
 - name: workspace/wk-analyze
-  version: 0.4.1
+  version: 0.4.5
   source: default
 - name: workspace/wk-deliver
-  version: 0.4.1
+  version: 0.4.5
   source: default
 - name: workspace/wk-document
-  version: 0.3.5
+  version: 0.3.9
   source: default
 - name: workspace/wk-plan
-  version: 0.4.1
+  version: 0.4.5
   source: default
 - name: workspace/wk-review
-  version: 0.4.1
+  version: 0.4.5
   source: default
 - name: workspace/wk-spec
-  version: 0.4.1
+  version: 0.4.5
   source: default
 - name: workspace/write-spec
-  version: 0.5.1
+  version: 0.6.3
   source: default
 outputs:
 - path: .agents/skills/address-review-feedback
