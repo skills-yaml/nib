@@ -33,6 +33,7 @@ new work requires verified main merge. See [SDLC](../instructions/tech/sdlc.md).
 <!-- SPEC-CATALOG:START -->
 | Spec | Primary feature | State | Status rationale |
 | --- | --- | --- | --- |
+| [T093](development/skills-mcp/T093_workspace_skill_pins_refresh.md) | skills-mcp | development | Adopt user-approved workspace skill pin upgrades across 20 direct skills; shares applied 0.7.3 patch reservation. |
 | [T092](test/interactive/T092_default_keymap_label_and_skill_pins.md) | interactive | test | Confirmed development merge 52ce663 via PR81 on 2026-10-28 after independent review, full native verification and Linux/macOS CI; patch 0.7.3 applied once; main delivery and publication separate. |
 | [T091](test/interactive/T091_stable_tall_transcript_selection.md) | interactive | test | Confirmed development merge 18705e72 via PR80 on 2026-10-26T15:50:03Z, pinned to branch tip e657398 with an identical tree; patch 0.7.2 applied once; development publication verified at 91a3788 by manifest observed 2026-10-28; main delivery remains unverified. |
 | [T089](test/architecture/T089_long_lived_store_reresolve.md) | architecture | test | Confirmed shared development merge f2f0544 via PR77 on 2026-10-25T17:07:25Z, pinned to reviewed head e3b74ad; historical member of published development 0.7.0 at f2f0544; late-join publication mismatch is reconciled in the spec and ledger; main delivery and production publication remain separate. |
