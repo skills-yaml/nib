@@ -1,6 +1,6 @@
 # T093: Workspace Skill Pins Refresh
 
-State: development
+State: test
 Primary Feature: skills-mcp
 
 ## Scope
@@ -40,7 +40,7 @@ No governed instruction changes.
 
 ## Affected Areas
 
-`skills.yaml`, `skills.lock.yaml`, `workspace/specs/development/skills-mcp/T093_workspace_skill_pins_refresh.md`, `workspace/specs/README.md`, and `workspace/releases.json`.
+`skills.yaml`, `skills.lock.yaml`, `workspace/specs/test/skills-mcp/T093_workspace_skill_pins_refresh.md`, `workspace/specs/README.md`, and `workspace/releases.json`.
 Consumers are agent skill execution and workflow skills across supported agents (Codex, Claude, Cursor, Grok, Hermes).
 
 ## Implementation Plan
@@ -73,3 +73,10 @@ Reverting pins requires only checking out previous manifest and lockfile version
 
 Status: none
 Rationale: Updating external workspace developer skill pins introduces no changes to runtime architecture, workload models, or persistent agent state.
+
+## Integration Evidence
+
+Revision: 1dba2e76f5b338cb81a67ad84fb34991823ebca0
+Outcome: passed
+
+PR [#82](https://github.com/skills-yaml/nib/pull/82) merged into shared `development` at 1dba2e76f5b338cb81a67ad84fb34991823ebca0 on 2026-11-15 after independent CI qualification (Validate and macOS tests passed) and full local verification. This moves T093 to test under the unreleased applied 0.7.3 patch reservation. Main delivery and publication remain separate.
