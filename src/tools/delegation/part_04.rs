@@ -1310,12 +1310,8 @@ pub(crate) fn resolve_nib_executable() -> Result<PathBuf, String> {
             .canonicalize()
             .map_err(|error| format!("failed to canonicalize the nib executable: {error}"));
     }
-    if current.parent().and_then(Path::parent).is_some() {
-        let candidate = current
-            .parent()
-            .and_then(Path::parent)
-            .expect("checked parent")
-            .join(expected_name);
+    for ancestor in current.ancestors() {
+        let candidate = ancestor.join(expected_name);
         if candidate.is_file() {
             return candidate.canonicalize().map_err(|error| {
                 format!("failed to canonicalize the test nib executable: {error}")

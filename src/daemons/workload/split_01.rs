@@ -1658,12 +1658,9 @@ pub(crate) fn worker_executable() -> Result<PathBuf, String> {
     {
         return Ok(current);
     }
-    if current.parent().and_then(Path::parent).is_some() {
-        let debug_dir = current
-            .parent()
-            .and_then(Path::parent)
-            .expect("checked parent");
-        let candidate = debug_dir.join(if cfg!(windows) { "nib.exe" } else { "nib" });
+    let expected_name = if cfg!(windows) { "nib.exe" } else { "nib" };
+    for ancestor in current.ancestors() {
+        let candidate = ancestor.join(expected_name);
         if candidate.is_file() {
             return Ok(candidate);
         }
