@@ -1,7 +1,7 @@
 # T085: Compact Claude-Style Waiting Indicator
 
-**Status:** Test
-State: test
+**Status:** Done.
+State: done
 Primary Feature: interactive
 
 ## Authority and Scope
@@ -105,3 +105,10 @@ and renewed Task verification before their push.
 
 Memory impact of this bounded push operation: none. The approved display
 preference is unchanged; delivery evidence belongs in the spec and work record.
+
+## Main Merge Evidence
+
+Revision: dd577725a2af6a51fc972a0b56afd7798f4ef34c
+Outcome: passed
+
+Confirmed fast-forward delivery from `development` to shared `main` at revision `dd577725a2af6a51fc972a0b56afd7798f4ef34c` (`dd57772`) on 2026-11-20. All required platform tests and verification gates passed. Publication remains tracked separately.

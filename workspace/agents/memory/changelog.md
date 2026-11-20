@@ -1032,3 +1032,22 @@ selected claude-opus-5; a later canary uses the independently configured default
 The proposed USD 2 combined ceiling is not spending approval. Protected configuration,
 account hard caps and explicit user spending authority remain prerequisites. This
 qualification-only slice changes no shipped adapter and establishes no live pass.
+
+## 2026-11-20 - Promoted 21 specifications to done on main delivery
+
+- Type: milestone
+- Source: fast-forward merge of development to main at dd57772
+- Confidence: high
+- Review: independent exact-candidate review across constituent PRs and reconciliation gates
+- Supersedes: none
+
+Content:
+
+Delivered all accumulated tested features to shared main at revision dd57772:
+twenty-one specifications moved from test to done across agent-runtime (T081, T090),
+architecture (T082, T089), build-quality (T087), interactive (T084, T085, T086, T091,
+T092), llm-providers (T069, T070, T071, T072, T073, T088), model-routing (FT-021),
+prompt-caching (FT-022), skills-mcp (T083, T093), and tools-sandbox (T080).
+Acceptance criteria, spec headers, status catalog rows, release reservations, and
+memory references are fully reconciled. T023 remains active in development.
+

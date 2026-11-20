@@ -1,7 +1,7 @@
 # T090: Preserve Tool History and Recover Read-Only Status Work
 
-**Status:** Test — integrated into development through PR #78 on 2026-10-26.
-State: test
+**Status:** Done.
+State: done
 Primary Feature: agent-runtime
 
 ## Problem and Evidence
@@ -332,3 +332,10 @@ at 11:42:53Z. The public development manifest binds version `0.7.1` to
 `ea889aea84358da0cded4bf129fe7e028917c479`. The release reservation is therefore
 closed to new implementation members. Later documentation commits are not covered
 by this observed publication event; main delivery remains separate and unverified.
+
+## Main Merge Evidence
+
+Revision: dd577725a2af6a51fc972a0b56afd7798f4ef34c
+Outcome: passed
+
+Confirmed fast-forward delivery from `development` to shared `main` at revision `dd577725a2af6a51fc972a0b56afd7798f4ef34c` (`dd57772`) on 2026-11-20. All required platform tests and verification gates passed. Publication remains tracked separately.

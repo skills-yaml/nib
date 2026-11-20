@@ -1,6 +1,7 @@
 # T073: Provider-Specific Model Selection
 
-State: test
+**Status:** Done.
+State: done
 Primary Feature: llm-providers
 
 Status rationale: Confirmed shared development integration at `81c37a1908ec1032809e97cdf0b0b39d5253603b`
@@ -198,3 +199,10 @@ preserved as superseded history. This record does not establish main delivery,
 publication, paid qualification or completion of later T080 phases. The
 subsequent lifecycle-record change renews independent review and affected
 documentation, governance and static checks; runtime inputs remain unchanged.
+
+## Main Merge Evidence
+
+Revision: dd577725a2af6a51fc972a0b56afd7798f4ef34c
+Outcome: passed
+
+Confirmed fast-forward delivery from `development` to shared `main` at revision `dd577725a2af6a51fc972a0b56afd7798f4ef34c` (`dd57772`) on 2026-11-20. All required platform tests and verification gates passed. Publication remains tracked separately.

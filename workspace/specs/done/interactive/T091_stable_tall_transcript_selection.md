@@ -1,7 +1,7 @@
 # T091: Stable Selection of Tall Transcript Blocks
 
-**Status:** Test — integrated into development through PR #80 on 2026-10-26.
-State: test
+**Status:** Done.
+State: done
 Primary Feature: interactive
 
 ## Problem
@@ -121,3 +121,10 @@ unchanged by that combine, and the merged tree matches the resolution tip.
 `task test:interactive`, `task docs:check`, and `task versions:check` passed
 on the fix branch before that combine. `task verify` and hosted CI were not
 run on `e657398` or `18705e72`.
+
+## Main Merge Evidence
+
+Revision: dd577725a2af6a51fc972a0b56afd7798f4ef34c
+Outcome: passed
+
+Confirmed fast-forward delivery from `development` to shared `main` at revision `dd577725a2af6a51fc972a0b56afd7798f4ef34c` (`dd57772`) on 2026-11-20. All required platform tests and verification gates passed. Publication remains tracked separately.

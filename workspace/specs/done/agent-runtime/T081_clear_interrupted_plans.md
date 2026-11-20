@@ -1,7 +1,7 @@
 # T081: Clear Interrupted Plans and Explain Verification Rejections
 
-**Status:** Test. Integrated into shared `development` on 2026-10-09.
-State: test
+**Status:** Done.
+State: done
 Primary Feature: agent-runtime
 
 ## Problem and Authority
@@ -73,18 +73,18 @@ cleared, and the user can ask for a new plan through the chat.
 
 ## Acceptance Criteria
 
-- [ ] AC-1: With the mock provider, a run that ends with a `Blocked` step clears
+- [x] AC-1: With the mock provider, a run that ends with a `Blocked` step clears
   the plan and records `plan_invalidated` with reason `interrupted`. The next
   chat message ("continue", the same goal or a new goal) is not rejected with
   `planning_required_active_plan`.
-- [ ] AC-2: User stop/cancel during a step clears the plan in the same way.
-- [ ] AC-3: A run paused on an approval card or question form keeps its plan,
+- [x] AC-2: User stop/cancel during a step clears the plan in the same way.
+- [x] AC-3: A run paused on an approval card or question form keeps its plan,
   and resuming through that prompt behaves as before.
-- [ ] AC-4: An undeclared `verification_id` returns a tool error that contains
+- [x] AC-4: An undeclared `verification_id` returns a tool error that contains
   the reason and the declared ids, and the model can retry within the same run.
-- [ ] AC-5: `/continue <id>` on a cleared plan returns a clear "plan was
+- [x] AC-5: `/continue <id>` on a cleared plan returns a clear "plan was
   cleared" error.
-- [ ] AC-6: `task verify` passes. Guide, catalog, versions and memory are
+- [x] AC-6: `task verify` passes. Guide, catalog, versions and memory are
   reconciled. A review is required because this changes the workload model.
 
 ## Implementation Plan
@@ -199,3 +199,10 @@ This observed integration establishes test state within the shared minor
 0.4.0 release. Main delivery, Windows qualification on the combined revision
 and publication remain separate. This lifecycle record renews independent
 review of the affected records.
+
+## Main Merge Evidence
+
+Revision: dd577725a2af6a51fc972a0b56afd7798f4ef34c
+Outcome: passed
+
+Confirmed fast-forward delivery from `development` to shared `main` at revision `dd577725a2af6a51fc972a0b56afd7798f4ef34c` (`dd57772`) on 2026-11-20. All required platform tests and verification gates passed. Publication remains tracked separately.

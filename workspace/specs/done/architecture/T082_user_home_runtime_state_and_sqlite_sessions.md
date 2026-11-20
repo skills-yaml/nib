@@ -1,8 +1,8 @@
 # T082: User-Home Runtime State and SQLite Sessions
 
-**Status:** Test. Started on 2026-10-22 under the user-requested goal; integrated
+**Status:** Done.
 into shared development on 2026-10-25 via PR74 (f8861c5).
-State: test
+State: done
 Primary Feature: architecture
 
 ## Problem and Authority
@@ -19,7 +19,7 @@ found these problems:
   `llm.providers.*.api_key` into `<project>/.nib/config.toml`
   (`src/auth.rs:4,125`). This file sits next to the code, is copied with the
   repository, is readable by supervised sandboxed commands (see
-  [T080](../../test/tools-sandbox/T080_workspace_sandbox_and_permission_modes.md)), and has
+  [T080](../../done/tools-sandbox/T080_workspace_sandbox_and_permission_modes.md)), and has
   no `.gitignore` protection.
 - **No user-global layer.** Config is project-only
   (`load_nib_config_full`, `src/config/split_00.rs:1553`), and every project
@@ -89,7 +89,7 @@ longer the only identity.
 4. **Sessions are scoped by project.** Each row carries `project_key` and
    `profile_id`, and `/sessions` lists the current project unless asked for all
    projects.
-5. **Worktrees outside the project.** Under [T080](../../test/tools-sandbox/T080_workspace_sandbox_and_permission_modes.md),
+5. **Worktrees outside the project.** Under [T080](../../done/tools-sandbox/T080_workspace_sandbox_and_permission_modes.md),
    sessions work in place by default and worktrees are opt-in. Session
    checkpoints and write leases also live in user-home state. Opt-in session
    worktrees and subagent worktrees are
@@ -262,7 +262,7 @@ Each phase is independently reviewable and keeps `task verify` green.
   `".nib"` or `".nib/…"` literal in production code outside that module. Test
   fixtures that build a legacy project tree on purpose keep their literal
   paths; the scan skips test-only files and inline test modules.
-- [ ] AC-7: Linux, macOS and Windows CI pass with the bundled SQLite. Doctor
+- [x] AC-7: Linux, macOS and Windows CI pass with the bundled SQLite. Doctor
   reports the new layout. Guide, tech docs, catalog, versions and memory are
   reconciled, and an independent review is complete (data integrity and
   credential handling).
@@ -787,3 +787,10 @@ at the 40-second PTY kill rather than at once (the same pattern as
 `wait_for_goal_session`).
 The merged tree equals the verified head. Main delivery and publication remain
 separate.
+
+## Main Merge Evidence
+
+Revision: dd577725a2af6a51fc972a0b56afd7798f4ef34c
+Outcome: passed
+
+Confirmed fast-forward delivery from `development` to shared `main` at revision `dd577725a2af6a51fc972a0b56afd7798f4ef34c` (`dd57772`) on 2026-11-20. All required platform tests and verification gates passed. Publication remains tracked separately.

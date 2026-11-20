@@ -1,7 +1,7 @@
 # T083: Progressive Skill Discovery and Management
 
-**Status:** Test. Integrated into shared `development` on 2026-10-09.
-State: test
+**Status:** Done.
+State: done
 Primary Feature: skills-mcp
 
 ## Problem and Scope
@@ -129,3 +129,10 @@ proven-fresh source verification.
 
 Memory impact of shared integration: updated; record the durable delivery event
 in facts.md and changelog.md.
+
+## Main Merge Evidence
+
+Revision: dd577725a2af6a51fc972a0b56afd7798f4ef34c
+Outcome: passed
+
+Confirmed fast-forward delivery from `development` to shared `main` at revision `dd577725a2af6a51fc972a0b56afd7798f4ef34c` (`dd57772`) on 2026-11-20. All required platform tests and verification gates passed. Publication remains tracked separately.

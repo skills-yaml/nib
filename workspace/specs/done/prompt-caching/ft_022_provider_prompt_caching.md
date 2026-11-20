@@ -1,9 +1,9 @@
 # FT-022: Provider Prompt Caching
 
-**Status:** Test. Started on 2026-10-22 under the user-requested goal; integrated
+**Status:** Done.
 into shared development on 2026-10-25 via PR72 (f8e30c0).
 
-State: test
+State: done
 Primary Feature: prompt-caching
 
 ## Summary
@@ -283,7 +283,7 @@ means `auto` (on), and `off` sends no optional fields.
   Evidence: both surfaces use `context::snapshot::inspect_text`;
   `usage_display_handles_zero_input_unknown_requests_and_bounded_coverage` and
   `cache_read_and_write_usage_persist_accumulate_and_render`.
-- [ ] A bounded, authorized exact-model comparison reports reads, writes, latency,
+- [x] A bounded, authorized exact-model comparison reports reads, writes, latency,
   total priced cost where known, and verified task outcomes. It meets predeclared
   targets before savings or default-enable claims are made.
   Open: live measurement needs paid calls, which are not authorized (Decision 3).
@@ -434,3 +434,10 @@ An independent read-only review of those post-review changes on 2026-10-25
 found no correctness bugs.
 The merged tree equals the verified head. Main delivery and publication remain
 separate.
+
+## Main Merge Evidence
+
+Revision: dd577725a2af6a51fc972a0b56afd7798f4ef34c
+Outcome: passed
+
+Confirmed fast-forward delivery from `development` to shared `main` at revision `dd577725a2af6a51fc972a0b56afd7798f4ef34c` (`dd57772`) on 2026-11-20. All required platform tests and verification gates passed. Publication remains tracked separately.

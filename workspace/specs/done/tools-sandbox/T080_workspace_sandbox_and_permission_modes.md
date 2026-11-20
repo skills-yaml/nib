@@ -1,9 +1,9 @@
 # T080: Claude Code / Codex-Style Workspace, Sandbox and Permission Modes
 
-**Status:** Test. Implementation started on 2026-10-08 with phase 1, after the
+**Status:** Done.
 user requested implementation; every phase was integrated into shared
 `development` by 2026-10-22 (see Integration Evidence).
-State: test
+State: done
 Primary Feature: tools-sandbox
 
 ## Problem and Authority
@@ -192,7 +192,7 @@ Rules for every level:
   Specific rules beat general ones.
 - **Rule layers:** user (`~/.nib/config.toml`), then trusted project shared
   (`.nib/config.toml`), then project local (user-home per-project state, see
-  [T082](../../test/architecture/T082_user_home_runtime_state_and_sqlite_sessions.md)).
+  [T082](../../done/architecture/T082_user_home_runtime_state_and_sqlite_sessions.md)).
   Project-shared rules apply only after the folder is trusted. Deny rules
   always apply.
 - **Prompt choices:** *Yes once* / *Yes, always allow `<prefix>` in this
@@ -1808,3 +1808,10 @@ Windows tests by policy (T059), so Windows evidence comes with main
 delivery. Phases 5d and 6 were integrated after 0.4.0 (the
 `nib-catalog-refresh` release T080 joined) was published; they ship in the
 next development build (0.5.2), and no second bump was applied for T080.
+
+## Main Merge Evidence
+
+Revision: dd577725a2af6a51fc972a0b56afd7798f4ef34c
+Outcome: passed
+
+Confirmed fast-forward delivery from `development` to shared `main` at revision `dd577725a2af6a51fc972a0b56afd7798f4ef34c` (`dd57772`) on 2026-11-20. All required platform tests and verification gates passed. Publication remains tracked separately.

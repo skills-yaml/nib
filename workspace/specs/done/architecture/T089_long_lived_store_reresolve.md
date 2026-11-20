@@ -1,7 +1,7 @@
 # T089: Re-resolve a Held Store After State Migration
 
-**Status:** Test. Confirmed shared development integration via PR 77.
-State: test
+**Status:** Done.
+State: done
 Primary Feature: architecture
 
 ## Problem
@@ -222,3 +222,10 @@ actual published membership and mark its ledger reservation released. This
 reconciliation changes documentation only, so Cargo.toml, Cargo.lock and the
 project version in skills.yaml remain unchanged. Future runtime implementation
 must reserve a fresh target. Main delivery and production publication are separate.
+
+## Main Merge Evidence
+
+Revision: dd577725a2af6a51fc972a0b56afd7798f4ef34c
+Outcome: passed
+
+Confirmed fast-forward delivery from `development` to shared `main` at revision `dd577725a2af6a51fc972a0b56afd7798f4ef34c` (`dd57772`) on 2026-11-20. All required platform tests and verification gates passed. Publication remains tracked separately.

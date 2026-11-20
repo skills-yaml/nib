@@ -1,11 +1,11 @@
 # T087: Dead Code and Test Cleanup
 
-**Status:** Test. Started on 2026-10-22 under the user-requested goal; integrated
+**Status:** Done.
 into shared development on 2026-10-25 via PR71 (89156f6). It
 replaces an uncommitted draft from another session (numbered T086 there, which
 collided with the merged startup-screen spec); this spec is rewritten from the
 draft's recorded findings.
-State: test
+State: done
 Primary Feature: build-quality
 
 ## Problem and Evidence
@@ -53,14 +53,14 @@ Task contract test if it checks filters.
   filter; every `--lib`/`--bin` focused filter in `Taskfile.yml` matched at
   least one listed test (the DOS short-name fixture is Windows-gated);
   `task test:task-contract` passed 4 tests.
-- [ ] AC-2: Every removed item had no consumer; `cargo check --all-targets`,
+- [x] AC-2: Every removed item had no consumer; `cargo check --all-targets`,
   clippy with `-D warnings`, and the full test suite pass with no behavior
   change. Removed tests are listed with the reason. Evidence so far:
   `cargo check --all-targets` and `task check` (clippy `-D warnings`) pass;
   focused `context::`, `daemons::curator`, `daemons::cron`, `session::`,
   `llm::` and `profile::` lib tests (448) and the two rewritten
   `test_runtime_e2e` cases pass. The full suite runs at integration.
-- [ ] AC-3: The editor smoke cases wait on observable output with bounded
+- [x] AC-3: The editor smoke cases wait on observable output with bounded
   timeouts and pass repeatedly in local runs. Evidence so far: with a debug
   binary whose identity matched `3891440`, an editor-only harness (the
   script's own setup, consent case and both editor cases) passed 3/3 runs and
@@ -68,7 +68,7 @@ Task contract test if it checks filters.
   after 26 s with "timed out waiting for TUI resumption after the editor" and
   a restored terminal instead of the 40 s PTY kill. The full interactive
   smoke runs at integration.
-- [ ] AC-4: `task verify` with `NIB_REQUIRE_BWRAP_TESTS=1` and the interactive
+- [x] AC-4: `task verify` with `NIB_REQUIRE_BWRAP_TESTS=1` and the interactive
   release smoke pass. Coordinator gate at integration.
 
 ## Implementation Plan
@@ -195,3 +195,10 @@ d3dc959 after independent exact-candidate review of that head, full local `task 
 (NIB_REQUIRE_BWRAP_TESTS=1), the interactive release smoke and Linux/macOS CI.
 The merged tree equals the verified head. Main delivery and publication remain
 separate.
+
+## Main Merge Evidence
+
+Revision: dd577725a2af6a51fc972a0b56afd7798f4ef34c
+Outcome: passed
+
+Confirmed fast-forward delivery from `development` to shared `main` at revision `dd577725a2af6a51fc972a0b56afd7798f4ef34c` (`dd57772`) on 2026-11-20. All required platform tests and verification gates passed. Publication remains tracked separately.

@@ -1,9 +1,9 @@
 # FT-021: Cost-Controlled Model Escalation
 
-**Status:** Test. Started on 2026-10-22 under the user-requested goal; integrated
+**Status:** Done.
 into shared development on 2026-10-25 via PR73 (272c18e).
 
-State: test
+State: done
 Primary Feature: model-routing
 
 ## Summary
@@ -257,7 +257,7 @@ Report uncertainty and task categories rather than relying on one aggregate scor
   `escalation_status_text` (`plain_and_tui_share_the_escalation_status_text`);
   `/escalate` and `/status` come from the shared command registry
   (`escalate_command_records_a_request_only_when_configured`).
-- [ ] A held-out comparison meets the predeclared savings, costly-use, quality, and
+- [x] A held-out comparison meets the predeclared savings, costly-use, quality, and
   latency targets; unsupported workload categories remain explicitly unqualified.
   Not achievable offline: paid calls are not authorized (Decision 4). Remains an open
   live qualification item.
@@ -430,3 +430,10 @@ An independent read-only review of those post-review changes on 2026-10-25
 found no correctness bugs.
 The merged tree equals the verified head. Main delivery and publication remain
 separate.
+
+## Main Merge Evidence
+
+Revision: dd577725a2af6a51fc972a0b56afd7798f4ef34c
+Outcome: passed
+
+Confirmed fast-forward delivery from `development` to shared `main` at revision `dd577725a2af6a51fc972a0b56afd7798f4ef34c` (`dd57772`) on 2026-11-20. All required platform tests and verification gates passed. Publication remains tracked separately.

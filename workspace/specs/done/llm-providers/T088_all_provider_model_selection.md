@@ -1,6 +1,7 @@
 # T088: Select Models Across Configured Providers
 
-State: test
+**Status:** Done.
+State: done
 Primary Feature: llm-providers
 
 ## Scope
@@ -113,3 +114,10 @@ rewriting the frozen records again. Test commands use one
 Cargo build job and disabled dev/test debug symbols to fit local memory; the
 initial default-debug lib-test compile was killed by the host. This changes no
 repository build policy or test selection. No paid provider requests are used.
+
+## Main Merge Evidence
+
+Revision: dd577725a2af6a51fc972a0b56afd7798f4ef34c
+Outcome: passed
+
+Confirmed fast-forward delivery from `development` to shared `main` at revision `dd577725a2af6a51fc972a0b56afd7798f4ef34c` (`dd57772`) on 2026-11-20. All required platform tests and verification gates passed. Publication remains tracked separately.

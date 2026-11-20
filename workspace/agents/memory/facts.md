@@ -603,7 +603,7 @@ body runs once. Renamed daemon/task directories must retain the held directory's
 identity, and locks and audit writes follow that same directory. Symlinks,
 replaced or foreign directories and missing completed-migration evidence still
 fail closed, without recreating legacy directories or duplicating a write.
-See [T089](../../specs/test/architecture/T089_long_lived_store_reresolve.md).
+See [T089](../../specs/done/architecture/T089_long_lived_store_reresolve.md).
 
 ## 2026-10-25 - Development 0.7.0 publication boundary
 
@@ -640,3 +640,31 @@ publication 0.7.1 is confirmed at ea889ae by manifest and successful artifact ru
 adapter configurations have offline multi-round complete/streaming coverage.
 T023 remains in development because its separate live-provider qualification is
 incomplete; no paid provider calls were made by this implementation.
+
+## 2026-11-20 - Verified main delivery of 21 test specifications
+
+- Type: fact
+- Source: confirmed fast-forward merge from development to main at dd57772
+- Confidence: high
+- Review: independent exact-candidate reviews and passing CI on all constituent PRs
+- Supersedes: test state records for the 21 promoted specifications
+
+Content:
+
+Twenty-one completed specifications in test state were verified and promoted to done
+following confirmed main delivery dd57772 on 2026-11-20:
+- agent-runtime: T081, T090
+- architecture: T082, T089
+- build-quality: T087
+- interactive: T084, T085, T086, T091, T092
+- llm-providers: T069, T070, T071, T072, T073, T088
+- model-routing: FT-021
+- prompt-caching: FT-022
+- skills-mcp: T083, T093
+- tools-sandbox: T080
+
+All 21 specifications have complete acceptance criteria satisfied and verified main
+merge evidence recorded. Catalog, release reservations, and memory inbound links
+are reconciled. T023 remains the sole active development specification pending live
+provider qualification; publication remains tracked separately.
+

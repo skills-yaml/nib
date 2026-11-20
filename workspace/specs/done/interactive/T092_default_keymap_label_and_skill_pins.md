@@ -1,6 +1,7 @@
 # T092: Default Keymap Label and Workspace Skill Pins
 
-State: test
+**Status:** Done.
+State: done
 Primary Feature: interactive
 
 ## Scope
@@ -8,8 +9,8 @@ Primary Feature: interactive
 Deliver the user-approved existing unstaged edits: display the Codex keymap
 preset as Default in startup and contextual footer hints, and update the
 workspace skill manifest and lockfile together. Follow up
-[T084](../../test/interactive/T084_codex_keymap_alignment.md) and
-[T086](../../test/interactive/T086_codex_style_startup_screen.md).
+[T084](../../done/interactive/T084_codex_keymap_alignment.md) and
+[T086](../../done/interactive/T086_codex_style_startup_screen.md).
 Preserve serialized preset names, key bindings, Legacy display, and workload state.
 No governed instruction edits.
 
@@ -94,3 +95,10 @@ the local checkout fast-forwarded to the confirmed remote merge. This moves T092
 to test and applies no second version bump. Main delivery and 0.7.3 publication
 remain separate; neither is inferred here. The integration-record revision receives
 fresh native documentation/version checks and full task verify before handoff.
+
+## Main Merge Evidence
+
+Revision: dd577725a2af6a51fc972a0b56afd7798f4ef34c
+Outcome: passed
+
+Confirmed fast-forward delivery from `development` to shared `main` at revision `dd577725a2af6a51fc972a0b56afd7798f4ef34c` (`dd57772`) on 2026-11-20. All required platform tests and verification gates passed. Publication remains tracked separately.
