@@ -5,6 +5,9 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 
 fn request_body(stream: &mut TcpStream) -> Value {
+    // BSD/macOS accept can inherit the listener's nonblocking mode; the bounded
+    // request reader needs blocking I/O with timeouts for headers and body frames.
+    stream.set_nonblocking(false).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
@@ -47,7 +50,10 @@ fn serve(
         for index in 0..requests {
             let mut stream = loop {
                 match listener.accept() {
-                    Ok((stream, _)) => break stream,
+                    Ok((stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
+                        break stream;
+                    }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         assert!(Instant::now() < deadline, "fixture request deadline");
                         std::thread::sleep(Duration::from_millis(5));
